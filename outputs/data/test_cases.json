@@ -1,0 +1,1388 @@
+[
+  {
+    "id": "tc_eb444645",
+    "query": "what's new in Python 3.13 vs 3.12 typing syntax ParamSpec TypeVarTuple",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "Python 3.13",
+        "ParamSpec",
+        "TypeVarTuple"
+      ],
+      "should_mention": [
+        "PEP 695",
+        "TypeAlias"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "docs.python.org should rank first because it is the authoritative source and will have the official whatsnew page with detailed syntax changes",
+      "expected_source_priority": [
+        "docs.python.org",
+        "realpython.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "official_documentation",
+        "technical_blog"
+      ],
+      "expected_elements": [
+        "code_blocks",
+        "comparison_tables"
+      ],
+      "noise_risks": [
+        "python_org_version_dropdown",
+        "realpython_cookie_banner"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_f0d17d75",
+    "query": "Goldman Sachs top stock picks July 2026 with tickers and price targets",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "paywalled_content",
+    "expected_coverage": {
+      "must_mention": [
+        "Goldman Sachs",
+        "ticker symbol",
+        "price target"
+      ],
+      "should_mention": [
+        "analyst rating",
+        "market outperform"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "source_prestige",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "Goldman Sachs official research page should rank first, but due to paywall, Bloomberg or CNBC articles summarizing picks may rank higher in search results.",
+      "expected_source_priority": [
+        "goldmansachs.com",
+        "bloomberg.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "research_report_paywall",
+        "financial_news_article"
+      ],
+      "expected_elements": [
+        "stock_selection_table",
+        "embedded_ticker_links"
+      ],
+      "noise_risks": [
+        "paywall_overlay",
+        "cookie_consent_banner",
+        "dynamic_table_via_javascript"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_89639350",
+    "query": "Apple Q2 2026 revenue breakdown iPhone services Mac vs Wall Street consensus",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "rapidly_changing",
+    "expected_coverage": {
+      "must_mention": [
+        "Apple",
+        "Q2_2026",
+        "iPhone_revenue",
+        "Wall_Street_consensus"
+      ],
+      "should_mention": [
+        "services_revenue",
+        "Mac_revenue"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "recency",
+        "source_authority"
+      ],
+      "ideal_ranking_rationale": "Apple's official press release ranks top for verifiable financials, followed by real-time financial news for context",
+      "expected_source_priority": [
+        "apple.com",
+        "bloomberg.com",
+        "barrons.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "earnings_release",
+        "data_heavy_article"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "financial_metric_cards"
+      ],
+      "noise_risks": [
+        "CNBC_video_autoplay",
+        "seekingalpha_cookie_overlay",
+        "wsj_paywall"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_15278c17",
+    "query": "Python 3.13 typing syntax updates compared to 3.12 ParamSpec and TypeVarTuple",
+    "intent": "comparative_research",
+    "difficulty": "easy",
+    "category": "code_documentation",
+    "expected_coverage": {
+      "must_mention": [
+        "Python_3.13",
+        "ParamSpec",
+        "TypeVarTuple"
+      ],
+      "should_mention": [
+        "PEP_646"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_documentation",
+        "version_specific",
+        "relevance"
+      ],
+      "ideal_ranking_rationale": "Python.org official docs for 3.13 should rank first",
+      "expected_source_priority": [
+        "docs.python.org",
+        "realpython.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "official_documentation",
+        "technical_blog"
+      ],
+      "expected_elements": [
+        "version_comparison_table",
+        "code_examples"
+      ],
+      "noise_risks": [
+        "version_not_yet_released_warning",
+        "beta_version_disclaimers"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_688a509c",
+    "query": "2026 state privacy law comparison chart CCPA California vs Colorado CPA vs Virginia VCDPA key requirements",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "California Consumer Privacy Act",
+        "Colorado Privacy Act",
+        "Virginia Consumer Data Protection Act"
+      ],
+      "should_mention": [
+        "sensitive data processing",
+        "consumer rights to opt-out"
+      ],
+      "min_relevant_results": 3
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "authoritative_privacy_organization",
+        "side-by-side_structure",
+        "recent_update_date"
+      ],
+      "ideal_ranking_rationale": "IAPP.org offers an authoritative, side-by-side interactive comparison covering all applicable state laws, updated for 2026, which beats static law firm checklists.",
+      "expected_source_priority": [
+        "iapp.org",
+        "bakerlaw.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "interactive_comparison_chart",
+        "law_firm_privacy_overview"
+      ],
+      "expected_elements": [
+        "comparison_tables",
+        "tabular_data_with_state_names"
+      ],
+      "noise_risks": [
+        "iapp_membership_prompt_wall",
+        "law_firm_cookie_consent_banner",
+        "newsletter_subscription_popup"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_839a6ac7",
+    "query": "FDA recommended daily added sugar limit 2026 grams per day for men and women",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "FDA",
+        "American Heart Association",
+        "added sugars"
+      ],
+      "should_mention": [
+        "total sugars",
+        "Daily Value"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "FDA.gov or DietaryGuidelines.gov should rank first for the authoritative numeric limit, followed by major health organizations.",
+      "expected_source_priority": [
+        "fda.gov",
+        "heart.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_page",
+        "nutrition_guidelines"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "definition_lists"
+      ],
+      "noise_risks": [
+        "fda_site_header_banner",
+        "cookie_consent_overlay",
+        "social_share_sticky_bar"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_aadb30d9",
+    "query": "USPTO patent term adjustment rules 2026 PTAB trials",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "USPTO",
+        "patent_term_adjustment",
+        "PTAB_trial"
+      ],
+      "should_mention": [
+        "terminal_disclaimer",
+        "request_for_continued_examination"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "authoritativeness",
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "USPTO.gov should rank first as the authoritative source for the legal rules, followed by a major IP law firm with detailed explanation.",
+      "expected_source_priority": [
+        "uspto.gov",
+        "foley.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_portal",
+        "legal_analysis_article"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "statutory_regulatory_citations"
+      ],
+      "noise_risks": [
+        "uspto_system_alert_banner",
+        "foley_cookie_consent_overlay"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_6b53cb03",
+    "query": "Japan Rail Pass July 2026 price comparison JR East vs JR West vs JR Kyushu green car ordinary",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "Japan_Rail_Pass",
+        "JR_East",
+        "JR_West",
+        "JR_Kyushu"
+      ],
+      "should_mention": [
+        "green_car",
+        "ordinary_car"
+      ],
+      "min_relevant_results": 3
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "price_currency",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "japanrailpass.net should rank first for the national pass overview, followed by regional JR company sites with official pricing",
+      "expected_source_priority": [
+        "japanrailpass.net",
+        "jreast.co.jp",
+        "westjr.co.jp",
+        "jrkyushu.co.jp"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "travel_guide",
+        "official_railway_portal"
+      ],
+      "expected_elements": [
+        "price_table",
+        "comparison_chart"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "language_selector_overlay",
+        "sticky_header"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_8ad5c14e",
+    "query": "how many grams of added sugar per day does FDA recommend in 2026 for adults",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "FDA",
+        "added_sugar",
+        "daily_limit"
+      ],
+      "should_mention": [
+        "men",
+        "women"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "FDA.gov or a reputable health site like CDC should rank first",
+      "expected_source_priority": [
+        "fda.gov",
+        "cdc.gov",
+        "heart.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_page",
+        "nutrition_guide"
+      ],
+      "expected_elements": [
+        "numeric_daily_value",
+        "table_with_gender_breakdown"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "popup_survey"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_91464a3b",
+    "query": "UC Berkeley UCLA San Diego 2026 freshman admit rates by major",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "UC Berkeley",
+        "UCLA",
+        "UC San Diego"
+      ],
+      "should_mention": [
+        "acceptance rate",
+        "admitted students",
+        "application volume"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_university_domain",
+        "data_recency"
+      ],
+      "ideal_ranking_rationale": "Official UC admissions site should rank highest, followed by reputable third-party aggregators with 2026 data.",
+      "expected_source_priority": [
+        "admission.universityofcalifornia.edu",
+        "collegefactual.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "institutional_data_portal",
+        "pdf_document"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "select_field_for_campus"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "campus_specific_nav"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_74ceb664",
+    "query": "What stocks does Goldman Sachs say to buy in July 2026 with target prices",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "paywalled_content",
+    "expected_coverage": {
+      "must_mention": [
+        "Goldman_Sachs",
+        "stock_picks",
+        "price_targets"
+      ],
+      "should_mention": [
+        "ticker_symbols"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "authority",
+        "recency"
+      ],
+      "ideal_ranking_rationale": "Goldman Sachs's own research portal should rank first but is likely paywalled, so reputable financial news outlets summarizing the picks would be top.",
+      "expected_source_priority": [
+        "goldmansachs.com",
+        "bloomberg.com",
+        "reuters.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "financial_research_report",
+        "news_article"
+      ],
+      "expected_elements": [
+        "table_of_stocks",
+        "price_targets"
+      ],
+      "noise_risks": [
+        "paywall_overlay",
+        "dynamic_content_loading"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_dd4f5459",
+    "query": "ECMAScript 2025 vs 2026 finalized features stage 4 proposal list",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "ECMAScript_2025",
+        "ECMAScript_2026",
+        "TC39_proposals"
+      ],
+      "should_mention": [
+        "stage_3",
+        "browser_implementation"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "recency",
+        "official_spec_link"
+      ],
+      "ideal_ranking_rationale": "The official TC39 specification repository (tc39.es) contains the authoritative list of finished proposals, ahead of MDN summaries.",
+      "expected_source_priority": [
+        "tc39.es",
+        "developer.mozilla.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "documentation",
+        "proposal_tracker"
+      ],
+      "expected_elements": [
+        "feature_comparison_tables",
+        "proposal_link_lists"
+      ],
+      "noise_risks": [
+        "tc39_github_issue_navigation",
+        "mdn_banner_promo"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_04205a98",
+    "query": "how many grams of sugar should an adult eat per day according to new FDA guidelines in 2026",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "FDA",
+        "added_sugar",
+        "daily_limit"
+      ],
+      "should_mention": [
+        "men_women_difference"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "FDA.gov or DietaryGuidelines.gov should rank first with the official 2025-2030 recommendations.",
+      "expected_source_priority": [
+        "fda.gov",
+        "dietaryguidelines.gov"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "nutrition_guideline",
+        "health_authority"
+      ],
+      "expected_elements": [
+        "grams_per_day_value",
+        "table_by_sex"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "auto_play_video"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_4d66dfdf",
+    "query": "CDC adult immunization schedule 2026 table vaccine names doses",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "CDC",
+        "Tdap",
+        "influenza"
+      ],
+      "should_mention": [
+        "pneumococcal",
+        "zoster"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "authority",
+        "recency"
+      ],
+      "ideal_ranking_rationale": "CDC's official site (cdc.gov) should rank first as the authoritative source for immunization schedules; other sources like immunize.org may follow.",
+      "expected_source_priority": [
+        "cdc.gov",
+        "immunize.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_portal",
+        "pdf_document"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "vaccine_name_cells"
+      ],
+      "noise_risks": [
+        "cdc_cookie_consent",
+        "sticky_header_navigation"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_921d35c4",
+    "query": "EU Digital Services Act 2026 deadline for very large online platforms risk assessments",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "EU_Digital_Services_Act",
+        "very_large_online_platforms",
+        "risk_assessment"
+      ],
+      "should_mention": [
+        "systemic_risk",
+        "independent_audit"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_EU_source",
+        "date_freshness",
+        "authoritative_analysis"
+      ],
+      "ideal_ranking_rationale": "Official EU legislation portals and EC digital strategy pages should rank highest because they define legal deadlines and obligations; law firm advisories are next for practical interpretation.",
+      "expected_source_priority": [
+        "eur-lex.europa.eu",
+        "digital-strategy.ec.europa.eu",
+        "whitecase.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_portal",
+        "law_firm_advisory"
+      ],
+      "expected_elements": [
+        "compliance_deadlines_tables",
+        "legal_definitions_list"
+      ],
+      "noise_risks": [
+        "EU_cookie_consent_banner",
+        "law_firm_contact_form_popup",
+        "pdf_inline_downloads"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_08a1ff59",
+    "query": "Federal Reserve dot plot June 2026 FOMC interest rate projections table",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "Federal Reserve",
+        "dot plot",
+        "federal funds rate"
+      ],
+      "should_mention": [
+        "median projection",
+        "longer-run rate"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "The Federal Reserve's official release page should rank first because it is the authoritative source for the dot plot data",
+      "expected_source_priority": [
+        "federalreserve.gov",
+        "bloomberg.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_portal",
+        "news_article"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "image_with_alt_text"
+      ],
+      "noise_risks": [
+        "interactive_chart_requiring_javascript",
+        "paywall_overlay_on_bloomberg"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_5230a085",
+    "query": "how many grams of added sugar should an adult consume daily according to FDA 2026 guidelines",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "FDA",
+        "added sugar",
+        "daily limit"
+      ],
+      "should_mention": [
+        "men",
+        "women"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "FDA.gov should rank first as the official source for dietary guidelines.",
+      "expected_source_priority": [
+        "fda.gov",
+        "heart.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_advisory",
+        "nutrition_guide"
+      ],
+      "expected_elements": [
+        "numeric_guideline",
+        "explanation_text"
+      ],
+      "noise_risks": [
+        "cookie_consent_overlay",
+        "related_articles_sidebar"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_bd1bd260",
+    "query": "global average temperature anomaly 2026 year to date NOAA NASA GISS Berkeley Earth",
+    "intent": "real_time",
+    "difficulty": "easy",
+    "category": "rapidly_changing",
+    "expected_coverage": {
+      "must_mention": [
+        "NOAA",
+        "NASA_GISS",
+        "Berkeley_Earth"
+      ],
+      "should_mention": [
+        "Copernicus",
+        "HadCRUT"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "data_freshness",
+        "institutional_authority"
+      ],
+      "ideal_ranking_rationale": "NASA GISS and NOAA are primary sources for global temperature data, updated monthly; Berkeley Earth provides independent validation. Official sources should rank first for recent anomaly values.",
+      "expected_source_priority": [
+        "data.giss.nasa.gov",
+        "ncdc.noaa.gov",
+        "berkeleyearth.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "research_institute_portal",
+        "climate_data_dashboard"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "time_series_chart_images"
+      ],
+      "noise_risks": [
+        "NOAA_oversize_header_banner",
+        "Berkeley_Earth_cookie_consent_popup"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_02b1edeb",
+    "query": "compare inside balcony cabin sizes 2026 Royal Caribbean Carnival Norwegian",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "Royal_Caribbean",
+        "Carnival_Cruise_Line",
+        "Norwegian_Cruise_Line"
+      ],
+      "should_mention": [
+        "interior_cabin",
+        "balcony_cabin",
+        "square_footage"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_cruise_line_site",
+        "detailed_specification_tables"
+      ],
+      "ideal_ranking_rationale": "Official cruise line deck plans and cabin descriptions should rank above third-party blog comparisons because they contain authoritative dimension data",
+      "expected_source_priority": [
+        "royalcaribbean.com",
+        "carnival.com",
+        "ncl.com",
+        "cruisecritic.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "cruise_line_deck_plan",
+        "travel_blog_comparison"
+      ],
+      "expected_elements": [
+        "comparison_tables",
+        "cabin_dimension_measurements"
+      ],
+      "noise_risks": [
+        "cookie_consent_overlay",
+        "dynamic_cabin_selector_popup",
+        "video_ad_interstitial"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_7b0cb65b",
+    "query": "what vaccines do adults need in 2026 according to the CDC schedule and how many doses each",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "CDC",
+        "adult immunization schedule",
+        "vaccine doses"
+      ],
+      "should_mention": [
+        "Tdap",
+        "influenza"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "CDC.gov should rank first as the authoritative source, followed by reputable medical sites mirroring the schedule.",
+      "expected_source_priority": [
+        "cdc.gov",
+        "immunize.org",
+        "mayoclinic.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government health portal",
+        "immunization schedule page"
+      ],
+      "expected_elements": [
+        "vaccine name columns",
+        "dose interval data"
+      ],
+      "noise_risks": [
+        "cookie consent overlay",
+        "sticky navigation bar on cdc.gov"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_121ff7e0",
+    "query": "ENSO status July 2026 NOAA Climate Prediction Center sea surface temperature anomalies forecast table",
+    "intent": "data_extraction",
+    "difficulty": "hard",
+    "category": "rapidly_changing",
+    "expected_coverage": {
+      "must_mention": [
+        "El Ni\u00f1o Southern Oscillation",
+        "NOAA",
+        "Climate Prediction Center"
+      ],
+      "should_mention": [
+        "Ni\u00f1o 3.4",
+        "La Ni\u00f1a watch"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "recency",
+        "authoritative_source"
+      ],
+      "ideal_ranking_rationale": "NOAA/CPC official advisory should rank first for real-time ENSO forecast data, superseding news aggregators.",
+      "expected_source_priority": [
+        "cpc.ncep.noaa.gov",
+        "climate.gov"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_advisory",
+        "climate_data_portal"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "probability_bar_charts"
+      ],
+      "noise_risks": [
+        "NOAA_Beta_site_header",
+        "alert_banner_for_government_shutdown"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_11afc8cd",
+    "query": "Singapore Airlines A380 vs Emirates A380 vs Qatar A350 economy seat size chart 2026",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "Singapore_Airlines",
+        "Emirates",
+        "Qatar_Airways"
+      ],
+      "should_mention": [
+        "seat_pitch",
+        "seat_width",
+        "A380",
+        "A350"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "authoritative_airline_data",
+        "recent_update_2026"
+      ],
+      "ideal_ranking_rationale": "Official airline seat maps or SeatGuru data should rank first because they provide directly sourced dimensions.",
+      "expected_source_priority": [
+        "seatguru.com",
+        "qatarairways.com",
+        "singaporeair.com",
+        "emirates.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "airline_seat_comparison",
+        "travel_blog"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "seat_map_images"
+      ],
+      "noise_risks": [
+        "cookie_consent_banners",
+        "seatguru_ad_popups",
+        "dynamic_chart_loading"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_8abf90d2",
+    "query": "2026 Human Development Index country rankings life expectancy education and GNI per capita",
+    "intent": "data_extraction",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "UNDP",
+        "Human Development Index",
+        "GNI per capita"
+      ],
+      "should_mention": [
+        "life expectancy at birth",
+        "mean years of schooling"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "UNDP HDR official page should rank first, followed by data aggregators like World Bank, because they are the authoritative source for the HDI data release.",
+      "expected_source_priority": [
+        "hdr.undp.org",
+        "worldbank.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "data_portal",
+        "report_pdf"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "country_ranking_list"
+      ],
+      "noise_risks": [
+        "javascript_heavy_interactive_map",
+        "cookie_consent_banners",
+        "pdf_download_prompt_overlay"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_5ac84dfe",
+    "query": "list of recommended vaccines for adults in 2026 from CDC with number of doses",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "CDC",
+        "adult_immunization_schedule",
+        "vaccine_doses"
+      ],
+      "should_mention": [
+        "recommended_ages"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "CDC.gov should rank first as the official source for immunization schedules",
+      "expected_source_priority": [
+        "cdc.gov",
+        "mayoclinic.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_portal",
+        "medical_reference"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "vaccine_name_list"
+      ],
+      "noise_risks": [
+        "cookie_consent_overlay",
+        "sticky_navigation"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_eb136550",
+    "query": "Amazon deforestation rate 2026 INPE PRODES vs GLAD University of Maryland hectares per year",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "rapidly_changing",
+    "expected_coverage": {
+      "must_mention": [
+        "INPE",
+        "PRODES",
+        "GLAD"
+      ],
+      "should_mention": [
+        "University of Maryland",
+        "hectares"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "data_freshness"
+      ],
+      "ideal_ranking_rationale": "INPE's PRODES portal should rank first as the authoritative official source for Brazilian Amazon deforestation data, with UMD's GLAD project providing a second independent satellite-based estimate.",
+      "expected_source_priority": [
+        "inpe.br",
+        "glad.umd.edu"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "research_dashboard",
+        "scientific_report"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "time_series_charts"
+      ],
+      "noise_risks": [
+        "INPE_portuguese_language_barrier",
+        "GLAD_interactive_map_loading_delay",
+        "cookie_consent_overlay"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_107f793b",
+    "query": "what are the recommended adult vaccines for 2026 and how many doses do you need",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "CDC",
+        "adult immunization schedule",
+        "vaccine names"
+      ],
+      "should_mention": [
+        "number of doses"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "authority"
+      ],
+      "ideal_ranking_rationale": "CDC.gov should rank first as the primary authority on immunization schedules.",
+      "expected_source_priority": [
+        "cdc.gov",
+        "immunize.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "health_portal",
+        "government_table"
+      ],
+      "expected_elements": [
+        "data_table",
+        "vaccine_list"
+      ],
+      "noise_risks": [
+        "cookie_consent_overlay",
+        "expandable_sections"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_de5e4df4",
+    "query": "QS World University Rankings 2026 engineering top 50 list",
+    "intent": "data_extraction",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "QS_World_University_Rankings",
+        "engineering_and_technology",
+        "MIT"
+      ],
+      "should_mention": [
+        "employability_score",
+        "University_of_Oxford"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "recency"
+      ],
+      "ideal_ranking_rationale": "The official QS ranking page at topuniversities.com should rank highest due to authoritative content and fresh 2026 data.",
+      "expected_source_priority": [
+        "topuniversities.com",
+        "qs.com",
+        "timeshighereducation.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "rankings_table_page",
+        "interactive_data_dashboard"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "university_cards",
+        "ranking_lists"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "lazy_loaded_table_with_javascript",
+        "popup_for_newsletter_signup"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_f7ea9535",
+    "query": "Rust async runtime tokio vs monoio vs smol performance benchmark 2026",
+    "intent": "comparative_research",
+    "difficulty": "hard",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "tokio",
+        "monoio",
+        "smol"
+      ],
+      "should_mention": [
+        "throughput",
+        "latency"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "methodology_transparency",
+        "benchmark_reproducibility"
+      ],
+      "ideal_ranking_rationale": "A dedicated benchmark blog post with clear setup and multiple scenarios should outrank casual forum discussions or outdated articles.",
+      "expected_source_priority": [
+        "blog.logrocket.com",
+        "tokio.rs"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "blog_post",
+        "documentation_page"
+      ],
+      "expected_elements": [
+        "benchmark_tables",
+        "code_snippets"
+      ],
+      "noise_risks": [
+        "cookie_consent_banner",
+        "ad_banner"
+      ]
+    },
+    "cache_intent": "novel"
+  },
+  {
+    "id": "tc_6031b1a8",
+    "query": "what is the FDA recommended daily limit for added sugar in 2026 for men and women in grams",
+    "intent": "factual_lookup",
+    "difficulty": "easy",
+    "category": "structured_data_extraction",
+    "expected_coverage": {
+      "must_mention": [
+        "FDA",
+        "added sugar",
+        "grams per day",
+        "men",
+        "women"
+      ],
+      "should_mention": [
+        "teaspoons"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "date_freshness"
+      ],
+      "ideal_ranking_rationale": "FDA.gov or a reputable health site with official guidance should rank first",
+      "expected_source_priority": [
+        "fda.gov",
+        "healthline.com"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "government_health_page",
+        "health_portal"
+      ],
+      "expected_elements": [
+        "daily_value_chart",
+        "sugar_limit_in_grams"
+      ],
+      "noise_risks": [
+        "cookie_banner",
+        "ad_overlay"
+      ]
+    },
+    "cache_intent": "semantic_near_miss"
+  },
+  {
+    "id": "tc_9222e13d",
+    "query": "California Advanced Clean Fleets regulation 2026 compliance deadlines for public fleet zero-emission vehicle purchase requirements",
+    "intent": "factual_lookup",
+    "difficulty": "hard",
+    "category": "pdf_document",
+    "expected_coverage": {
+      "must_mention": [
+        "California Air Resources Board",
+        "Advanced Clean Fleets",
+        "zero-emission vehicle"
+      ],
+      "should_mention": [
+        "model year 2026",
+        "state and local government fleets"
+      ],
+      "min_relevant_results": 2
+    },
+    "expected_ranking": {
+      "ranking_signals": [
+        "official_source",
+        "recency",
+        "regulatory_authority"
+      ],
+      "ideal_ranking_rationale": "The official California Air Resources Board regulatory text should rank above news summaries, as it contains the exact legal deadlines and purchase percentage tables.",
+      "expected_source_priority": [
+        "ww2.arb.ca.gov",
+        "calstart.org"
+      ]
+    },
+    "expected_scrape_challenges": {
+      "likely_page_types": [
+        "pdf_document",
+        "nav_heavy_portal",
+        "long_form_article"
+      ],
+      "expected_elements": [
+        "data_tables",
+        "compliance_schedule_charts",
+        "footnote_definitions"
+      ],
+      "noise_risks": [
+        "cookies_consent_banner_on_gov_site",
+        "multi_level_interstitial_nav",
+        "pdf_download_mobile_redirect"
+      ]
+    },
+    "cache_intent": "novel"
+  }
+]

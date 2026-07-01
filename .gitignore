@@ -1,0 +1,76 @@
+# ─── Environment Variables & Secrets ───────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Python Bytecode & Cache ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ─── Virtual Environments ──────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ─── Dynamic Pipeline Outputs & Run Logs ───────────────────────────────────
+outputs/runs/*
+!outputs/runs/.gitkeep
+*.log
+*.log.*
+logs/
+
+# ─── Testing & Coverage ────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+
+# ─── IDEs & Editors ────────────────────────────────────────────────────────
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Type Checking & Linters ───────────────────────────────────────────────
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ─── Local Scratch & Temporary Files ───────────────────────────────────────
+tmp/
+scratch/
+*.tmp
+*.bak

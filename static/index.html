@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔥 Firecrawl Eval Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>🔥 Firecrawl Eval</h2>
+            </div>
+            <button id="btn-run-new" class="btn-primary">▶ Run New Eval</button>
+            <div class="runs-list">
+                <h3>Past Runs</h3>
+                <ul id="runs-ul">
+                    <!-- populated by js -->
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-nav">
+                <nav>
+                    <button class="tab-btn active" data-target="view-live">Live Pipeline</button>
+                    <button class="tab-btn" data-target="view-overview">Overview</button>
+                    <button class="tab-btn" data-target="view-report">Report</button>
+                    <button class="tab-btn" data-target="view-testcases">Test Cases</button>
+                    <button class="tab-btn" data-target="view-kb">KB Explorer</button>
+                    <button class="tab-btn" data-target="view-rl">RL Signals</button>
+                </nav>
+                <div class="header-status">
+                    <span id="header-run-id">Select a run</span>
+                </div>
+            </header>
+
+            <div class="view-container">
+                <!-- Live Pipeline View -->
+                <div id="view-live" class="view active">
+                    <div class="live-header">
+                        <div class="status-indicator">
+                            <div id="live-dot" class="dot"></div>
+                            <span id="live-status-text">Idle</span>
+                        </div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div id="live-progress" class="progress-bar" style="width: 0%"></div>
+                    </div>
+                    <div class="live-layout">
+                        <div class="live-event-feed" id="live-feed">
+                            <!-- events go here -->
+                        </div>
+                        <div class="live-scores-sidebar">
+                            <h4>Real-time TC Leaderboard</h4>
+                            <div class="live-scores-grid" id="live-scores-grid">
+                                <div class="empty-msg">No live scores yet</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Overview View -->
+                <div id="view-overview" class="view">
+                    <div class="overview-section">
+                        <h3>Key Dimension Performance</h3>
+                        <div class="scores-grid">
+                            <div class="score-card ring-card">
+                                <div class="ring-container">
+                                    <svg viewBox="0 0 36 36" class="circular-chart">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                        <path id="ring-overall" class="circle" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                    </svg>
+                                    <div class="score-value" id="ov-overall">0.00</div>
+                                </div>
+                                <h4>Overall Score</h4>
+                            </div>
+                            <div class="score-card ring-card">
+                                <div class="ring-container">
+                                    <svg viewBox="0 0 36 36" class="circular-chart">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                        <path id="ring-coverage" class="circle" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                    </svg>
+                                    <div class="score-value" id="ov-coverage">0.00</div>
+                                </div>
+                                <h4>Coverage Recall</h4>
+                            </div>
+                            <div class="score-card ring-card">
+                                <div class="ring-container">
+                                    <svg viewBox="0 0 36 36" class="circular-chart">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                        <path id="ring-ranking" class="circle" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                    </svg>
+                                    <div class="score-value" id="ov-ranking">0.00</div>
+                                </div>
+                                <h4>Ranking NDCG@5</h4>
+                            </div>
+                            <div class="score-card ring-card">
+                                <div class="ring-container">
+                                    <svg viewBox="0 0 36 36" class="circular-chart">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                        <path id="ring-scrape" class="circle" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                                    </svg>
+                                    <div class="score-value" id="ov-scrape">0.00</div>
+                                </div>
+                                <h4>Scrape Quality</h4>
+                            </div>
+                        </div>
+                        <div class="overview-row stats-row">
+                            <div class="stat-box"><span>Pass Rate (≥0.8)</span><strong id="ov-pass-rate">0%</strong></div>
+                            <div class="stat-box"><span>Best Query</span><strong id="ov-best-query">—</strong></div>
+                            <div class="stat-box"><span>Worst Query</span><strong id="ov-worst-query">—</strong></div>
+                            <div class="stat-box"><span>Avg Scrape Latency</span><strong id="ov-latency">— ms</strong></div>
+                        </div>
+                        <div class="overview-row histograms-container" id="ov-histograms">
+                            <!-- populated by js -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report View -->
+                <div id="view-report" class="view">
+                    <div class="report-header">
+                        <h3>Detailed Markdown Report</h3>
+                        <button id="btn-download-report" class="btn-secondary" style="display: none;">📥 Download Report</button>
+                    </div>
+                    <div id="report-content" class="markdown-body">
+                        <p style="color:var(--text-secondary)">No report available.</p>
+                    </div>
+                </div>
+
+                <!-- Test Cases View -->
+                <div id="view-testcases" class="view">
+                    <div class="tc-controls">
+                        <input type="text" id="tc-search-input" placeholder="Filter by test case ID or query keyword...">
+                        <select id="tc-category-filter">
+                            <option value="">All Categories</option>
+                        </select>
+                    </div>
+                    <table class="data-table tc-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px;"></th>
+                                <th>Test Case ID</th>
+                                <th>Overall</th>
+                                <th>Coverage</th>
+                                <th>Ranking</th>
+                                <th>Scrape Qual.</th>
+                                <th>Summary / Query</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tc-tbody">
+                            <!-- populated by js -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- KB Explorer View -->
+                <div id="view-kb" class="view">
+                    <div class="kb-stats-grid" id="kb-stats-grid">
+                        <div class="kb-stat"><span id="kb-doc-count">—</span><label>Collection Points</label></div>
+                        <div class="kb-stat"><span id="kb-url-count">—</span><label>Unique URLs</label></div>
+                        <div class="kb-stat"><span id="kb-dedup-count">—</span><label>Deduped Hits</label></div>
+                        <div class="kb-stat"><span id="kb-status">—</span><label>Status</label></div>
+                    </div>
+                    <div class="search-box">
+                        <input type="text" id="kb-search-input" placeholder="Search KB (Hybrid RRF)...">
+                        <button id="kb-search-btn">Search</button>
+                    </div>
+                    <div id="kb-results" class="kb-results-container">
+                        <!-- results -->
+                    </div>
+                </div>
+
+                <!-- RL Signals View -->
+                <div id="view-rl" class="view">
+                    <div class="rl-header">
+                        <div class="rl-tabs">
+                            <button class="rl-tab active" data-panel="dpo">DPO Pairs</button>
+                            <button class="rl-tab" data-panel="taxonomy">Pattern Taxonomy</button>
+                            <button class="rl-tab" data-panel="diagnostics">Diagnostics</button>
+                            <button class="rl-tab" data-panel="rewards">Reward Distribution</button>
+                        </div>
+                        <button id="btn-export-rl" class="btn-secondary">⬇ Export DPO JSONL</button>
+                    </div>
+                    <div id="rl-panel-dpo" class="rl-panel active">
+                        <!-- DPO pairs browser -->
+                    </div>
+                    <div id="rl-panel-taxonomy" class="rl-panel">
+                        <!-- taxonomy bars -->
+                    </div>
+                    <div id="rl-panel-diagnostics" class="rl-panel">
+                        <!-- per-TC failure diagnosis cards -->
+                    </div>
+                    <div id="rl-panel-rewards" class="rl-panel">
+                        <!-- reward distribution histogram -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="/app.js"></script>
+</body>
+</html>
