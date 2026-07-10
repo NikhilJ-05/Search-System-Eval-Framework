@@ -60,10 +60,42 @@ async def serve_css():
 
 @app.get("/api/runs")
 async def list_runs():
-    return store.list_runs()
+    return store.list_runs_with_meta()
 
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
+    data = store._get_full_run(run_id)
+    if data is None:
+        return JSONResponse(status_code=404, content={"detail": "Run not found"})
+    return data
+
+@app.get("/api/runs/{run_id}/status")
+async def get_run_status(run_id: str):
+    data = store.get_run_status(run_id)
+    if data is None:
+        return JSONResponse(status_code=404, content={"detail": "Run meta not found"})
+    return data
+
+@app.get("/api/runs/{run_id}/dimensions")
+async def get_run_dimensions(run_id: str):
+    data = store._get_full_run(run_id)
+    if data is None:
+        return JSONResponse(status_code=404, content={"detail": "Run not found"})
+    
+    # Extract dimensions from the first test case evaluation
+    results = data.get("eval_results", [])
+    if not results:
+        return []
+    
+    # Find the first result with dimension_evals
+    for r in results:
+        if "dimension_evals" in r and r["dimension_evals"]:
+            return [{"name": d["dimension_name"], "weight": d.get("weight", 0)} for d in r["dimension_evals"]]
+            
+    return []
+
+@app.get("/api/runs/{run_id}/live")
+async def get_run_live(run_id: str):
     data = store._get_full_run(run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
@@ -124,16 +156,20 @@ async def stream_run(request: Request, run_id: str):
         return JSONResponse(status_code=404, content={"detail": "Run stream not found"})
         
     async def event_generator():
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                event = await asyncio.wait_for(q.get(), timeout=1.0)
-                yield json.dumps(event)
-                if event.get("type") in ("run_complete", "run_error"):
+        try:
+            while True:
+                if await request.is_disconnected():
                     break
-            except asyncio.TimeoutError:
-                yield json.dumps({"type": "ping", "time": time.time()})
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=1.0)
+                    yield json.dumps(event)
+                    if event.get("type") in ("run_complete", "run_error"):
+                        break
+                except asyncio.TimeoutError:
+                    yield json.dumps({"type": "ping", "time": time.time()})
+        finally:
+            if run_id in active_queues:
+                del active_queues[run_id]
                 
     return EventSourceResponse(event_generator())
 

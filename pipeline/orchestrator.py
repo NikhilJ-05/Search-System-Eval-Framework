@@ -26,6 +26,7 @@ from eval.improvement_agent import ImprovementAgent
 from models.test_case import TestCase
 from models.eval_result import FirecrawlSearchResult
 import contextvars
+from pipeline.store import PipelineStore, RunMetadata
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.dirname(BASE_DIR)  # Firecrawl root
@@ -36,6 +37,7 @@ sse_queue_var: contextvars.ContextVar[asyncio.Queue] = contextvars.ContextVar('s
 class Orchestrator:
     def __init__(self, config: EvalConfig):
         self.config = config
+        self.store = PipelineStore()
         self.or_pool = OpenRouterClientPool(config)
         self.fc_pool = FirecrawlClientPool(config)
         self.embedder = EmbedderClient()
@@ -71,9 +73,6 @@ class Orchestrator:
                 logger.error(f"Failed to emit SSE event: {e}")
 
     async def _save_live_run(self, run_id: str, test_cases: list, eval_results: list, tc_diagnoses: list):
-        run_dir = os.path.join(APP_DIR, "outputs", "runs", run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        run_file_path = os.path.join(run_dir, "run.json")
         import dataclasses
         run_payload = {
             "run_id": run_id,
@@ -82,9 +81,10 @@ class Orchestrator:
             "tc_diagnoses": [dataclasses.asdict(d) for d in tc_diagnoses],
             "status": "running"
         }
+        
         def _write():
-            with open(run_file_path, "w", encoding="utf-8") as f:
-                json.dump(run_payload, f, indent=2)
+            self.store.write_run_atomic(run_id, run_payload)
+            
         await asyncio.to_thread(_write)
 
     def _load_existing_test_cases(self) -> List[TestCase]:
@@ -141,7 +141,14 @@ class Orchestrator:
         """Process a single test case with caching."""
         async with semaphore:
             logger.info(f"[Pipeline R{round_idx}] ─── TC {tc_idx+1}/{total_in_batch}: {tc.id} | query={repr(tc.query[:60])}")
-            self._emit_event({"type": "tc_processing", "tc_id": tc.id})
+            self._emit_event({
+                "type": "tc_processing", 
+                "tc_id": tc.id,
+                "query": tc.query,
+                "intent": getattr(tc, "intent", "unknown"),
+                "difficulty": getattr(tc, "difficulty", "unknown"),
+                "chaos_archetype": getattr(tc, "chaos_archetype", "none")
+            })
             tc_new_entries = []
 
             # Layer 1: Query Cache
@@ -286,11 +293,17 @@ class Orchestrator:
             self._emit_event({
                 "type": "judge_scored",
                 "tc_id": tc.id,
-                "coverage": eval_res.coverage_score,
-                "ranking": eval_res.ranking_score,
-                "scrape": eval_res.fidelity_score,
                 "overall": eval_res.overall_score,
-                "has_report": True
+                "dimension_scores": [
+                    {
+                        "name": d.dimension_name,
+                        "weight": d.weight,
+                        "score": d.score,
+                        "level": d.assigned_level
+                    } for d in eval_res.dimension_evals
+                ],
+                "warnings": eval_res.warnings,
+                "has_report": False
             })
 
             if indexing_task is not None:
@@ -336,9 +349,12 @@ class Orchestrator:
                 "type": "tc_diagnosis_complete", 
                 "tc_id": tc.id,
                 "passed": getattr(diagnosis, 'passed', False),
+                "root_cause_summary": getattr(diagnosis, 'root_cause_summary', ''),
+                "failure_dimensions": getattr(diagnosis, 'failure_dimensions', []),
                 "micro_pattern": diagnosis.micro_pattern.get("pattern_type") if diagnosis.micro_pattern else None,
                 "improvement_actions_count": len(diagnosis.improvement_actions) if hasattr(diagnosis, 'improvement_actions') else 0
             })
+            self._emit_event({"type": "tc_report_ready", "tc_id": tc.id})
             
             # Update live lists before saving
             self.live_eval_results = [r for r in self.live_eval_results if r.test_case_id != eval_res.test_case_id] + [eval_res]
@@ -352,7 +368,27 @@ class Orchestrator:
             run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
         logger.info(f"Starting pipeline run: {run_id}")
-        self._emit_event({"type": "run_start", "run_id": run_id})
+        start_time = time.time()
+        
+        # Write initial metadata
+        initial_meta = RunMetadata(
+            run_id=run_id,
+            status="running",
+            started_at=datetime.now().isoformat(),
+            tc_count=self.config.num_test_cases
+        )
+        self.store.write_run_metadata(run_id, initial_meta)
+        
+        self._emit_event({
+            "type": "run_start", 
+            "run_id": run_id,
+            "config_snapshot": {
+                "num_tcs": self.config.num_test_cases,
+                "generator_model": self.config.generator_model,
+                "judge_model": self.config.judge_model,
+                "pass_threshold": self.config.pass_threshold
+            }
+        })
         
         try:
             # Init resources concurrently
@@ -390,7 +426,9 @@ class Orchestrator:
                 # --- Generate TC ---
                 logger.info(f"=== Session Progress — generating TC {i+1}/{total_needed} ===")
                 self._emit_event({"type": "phase_start", "phase": "test_generation",
-                                  "message": f"Generating TC {i+1}/{total_needed}..."})
+                                  "message": f"Generating TC {i+1}/{total_needed}...",
+                                  "current": i+1, "total": total_needed, "pct": int(((i+1)/total_needed)*100)})
+                self._emit_event({"type": "phase_progress", "phase": "test_generation", "current": i+1, "total": total_needed})
 
                 new_tcs = await self.generator.generate(1)
                 if not new_tcs:
@@ -407,7 +445,9 @@ class Orchestrator:
 
                 # --- Execute this TC ---
                 self._emit_event({"type": "phase_start", "phase": "execution",
-                                  "message": f"Executing TC {i+1}/{total_needed}..."})
+                                  "message": f"Executing TC {i+1}/{total_needed}...",
+                                  "current": i+1, "total": total_needed})
+                self._emit_event({"type": "phase_progress", "phase": "execution", "current": i+1, "total": total_needed})
                 
                 result = await self._process_tc(tc, i, total_needed, i+1,
                                      all_search_results, all_eval_results, semaphore)
@@ -496,9 +536,6 @@ class Orchestrator:
             )
             
             # Persist results asynchronously in dedicated run folder
-            run_dir = os.path.join(APP_DIR, "outputs", "runs", run_id)
-            os.makedirs(run_dir, exist_ok=True)
-            run_file_path = os.path.join(run_dir, "run.json")
             run_payload = {
                 "run_id": run_id,
                 "test_cases": [dataclasses.asdict(tc) for tc in all_test_cases],
@@ -507,22 +544,51 @@ class Orchestrator:
                 "improvement_analysis": dataclasses.asdict(improvement_analysis),
                 "regression": reg_data,
                 "report_path": report_path,
-                "tc_report_paths": tc_report_paths
+                "tc_report_paths": tc_report_paths,
+                "status": "completed"
             }
+            
+            duration_s = time.time() - start_time
+            overall_score = sum(e.overall_score for e in all_eval_results) / max(1, len(all_eval_results))
+            
+            final_meta = RunMetadata(
+                run_id=run_id,
+                status="completed",
+                overall_score=overall_score,
+                tc_count=len(all_test_cases),
+                started_at=initial_meta.started_at,
+                finished_at=datetime.now().isoformat(),
+                duration_s=duration_s
+            )
+            
             def _write_run():
-                with open(run_file_path, "w", encoding="utf-8") as f:
-                    json.dump(run_payload, f, indent=2)
+                self.store.write_run_atomic(run_id, run_payload)
+                self.store.write_run_metadata(run_id, final_meta)
+                
             await asyncio.to_thread(_write_run)
             
-            overall_score = sum(e.overall_score for e in all_eval_results) / max(1, len(all_eval_results))
-            self._emit_event({"type": "run_complete", "run_id": run_id, "overall_score": overall_score})
+            self._emit_event({
+                "type": "run_complete", 
+                "run_id": run_id, 
+                "overall_score": overall_score,
+                "pass_rate": sum(1 for e in all_eval_results if e.passes(self.config.pass_threshold)) / max(1, len(all_eval_results)),
+                "total_tcs": len(all_test_cases),
+                "duration_s": duration_s,
+                "report_path": report_path
+            })
             logger.info(f"Pipeline complete. Report: {report_path}")
             
         except asyncio.CancelledError:
             logger.warning(f"Pipeline {run_id} cancelled by client. Shield should protect it, but handling gracefully.")
+            
+            error_meta = RunMetadata(run_id=run_id, status="cancelled", started_at=getattr(initial_meta, "started_at", None))
+            self.store.write_run_metadata(run_id, error_meta)
             self._emit_event({"type": "run_error", "error": "Cancelled by client"})
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)
+            
+            error_meta = RunMetadata(run_id=run_id, status="error", started_at=getattr(initial_meta, "started_at", None))
+            self.store.write_run_metadata(run_id, error_meta)
             self._emit_event({"type": "run_error", "error": str(e)})
         finally:
             await self.or_pool.aclose()

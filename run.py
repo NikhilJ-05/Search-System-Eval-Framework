@@ -1,8 +1,8 @@
 """
-run.py — Single entry point for the Firecrawl Eval Showcase pipeline.
+run.py — Single entry point for the EvalOS Framework pipeline.
 
 Usage:
-  python run.py                     # Start the web dashboard (FastAPI + SSE)
+  python run.py                     # Start the web dashboard and open browser
   python run.py --cli               # Full pipeline run in terminal
   python run.py --cli --cases 5     # Quick test with only 5 test cases
   python run.py --calibrate-only    # Only run judge calibration pre-flight
@@ -12,6 +12,9 @@ import argparse
 import logging
 import sys
 import os
+import threading
+import time
+import webbrowser
 
 # ── pretty logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -47,7 +50,7 @@ async def run_pipeline(num_cases: int = None):
         config.num_test_cases = num_cases
 
     logger.info("=" * 60)
-    logger.info("  Firecrawl Eval Showcase — Full Pipeline Run")
+    logger.info("  EvalOS Framework — Full Pipeline Run")
     logger.info("=" * 60)
     logger.info(f"  Generator model : {config.generator_model}")
     logger.info(f"  Judge model     : {config.judge_model}")
@@ -61,13 +64,6 @@ async def run_pipeline(num_cases: int = None):
     q = asyncio.Queue()
 
     async def drain_events():
-        phases = {
-            "calibration":           "[1/7] Calibration",
-            "test_generation":       "[2/7] Test Generation",
-            "retrieval_comparison":  "[5/7] Retrieval Comparison",
-            "rl_signals":            "[6/7] RL Signal Generation",
-            "report":                "[7/7] Building Report",
-        }
         while True:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=2.0)
@@ -75,27 +71,18 @@ async def run_pipeline(num_cases: int = None):
 
                 if t == "run_start":
                     logger.info(f"Run started: {ev['run_id']}")
-                elif t == "phase_start":
-                    label = phases.get(ev["phase"], ev["phase"])
-                    msg   = ev.get("message", "")
-                    logger.info(f"{label}  {msg}")
-                elif t == "test_case_created":
-                    logger.info(f"    [TC] {ev['tc_id']}  \"{ev['query'][:60]}\"")
-                elif t == "firecrawl_search_done":
-                    logger.info(f"    [FC Search]  {ev['tc_id']}  {ev['result_count']} results  {ev['latency_ms']:.0f}ms")
-                elif t == "firecrawl_scrape_done":
-                    status_icon = "OK" if ev["status"] == "success" else "!!"
-                    logger.info(f"    [Scrape {status_icon}]  {ev['tc_id']}  {ev['url'][:60]}")
-                elif t == "judge_scored":
-                    logger.info(
-                        f"    [Judge]  {ev['tc_id']}  "
-                        f"cov={ev['coverage']:.2f}  rnk={ev['ranking']:.2f}  "
-                        f"scr={ev.get('scrape', 0):.2f}  overall={ev['overall']:.2f}"
-                    )
-                elif t == "indexed":
-                    logger.info(f"    [Index]  {ev['tc_id']}  indexed to Qdrant")
-                elif t == "phase_complete":
-                    logger.info(f"    Phase complete: {ev['phase']}  {ev}")
+                elif t == "config":
+                    logger.info(f"Config: {ev['config']}")
+                elif t == "stage_start":
+                    logger.info(f"Stage started: {ev['stage']} for TC {ev.get('tc_id', '')}")
+                elif t == "dimension_scored":
+                    logger.info(f"    [Score] TC {ev['tc_id']} - {ev['dimension']}: {ev['score']:.3f}")
+                elif t == "diagnosis":
+                    logger.info(f"    [Diagnosis] Triggered for TC {ev['tc_id']} (score: {ev['overall']:.3f})")
+                elif t == "tc_complete":
+                    logger.info(f"    [TC Complete] {ev['tc_id']}  overall={ev['overall']:.3f}")
+                elif t == "phase_progress":
+                    logger.info(f"Progress: Phase {ev['phase']} - {ev['progress_pct']}%")
                 elif t == "run_complete":
                     logger.info("=" * 60)
                     logger.info(f"  Run complete: {ev['run_id']}")
@@ -133,13 +120,18 @@ async def run_calibration_only():
     finally:
         await or_pool.aclose()
 
+def open_browser():
+    time.sleep(1.5)
+    webbrowser.open("http://localhost:8000")
+
 def run_server():
     import uvicorn
-    logger.info("Starting Firecrawl Eval Dashboard at http://localhost:8000")
+    logger.info("Starting EvalOS Framework Dashboard at http://localhost:8000")
+    threading.Thread(target=open_browser, daemon=True).start()
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
 
 def main():
-    parser = argparse.ArgumentParser(description="Firecrawl Eval Showcase")
+    parser = argparse.ArgumentParser(description="EvalOS Framework")
     parser.add_argument("--cli", action="store_true",
                         help="Run the pipeline in CLI mode (no web server)")
     parser.add_argument("--calibrate-only", action="store_true",
