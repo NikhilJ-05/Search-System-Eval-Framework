@@ -251,7 +251,7 @@ This is where the run fell apart. With a weight of 0.40, a scrape score of 0.50 
 
 **Why 0% Layer 2 hits?**
 
-This is expected and correct. The run was executing with `BATCH_SIZE=1` (one TC per round). The KB builds from scratch, and with a `KB_FRESHNESS_WINDOW=600s`, content indexed in round N is only eligible for reuse in round N+1 if round N+1 executes within 10 minutes. With 30 sequential rounds and LLM call times, rounds are spaced far apart enough that by the time a URL would get re-queried, its KB entry has expired.
+This is expected and correct. The run executes sequentially (one TC at a time). The KB builds from scratch, and with a `KB_FRESHNESS_WINDOW=600s`, content indexed for TC N is only eligible for reuse in TC N+1 if TC N+1 executes within 10 minutes. With 30 sequential cases and LLM call times, runs are spaced far apart enough that by the time a URL would get re-queried, its KB entry has expired.
 
 The 0% Layer 2 rate is not a bug — it indicates the cache is behaving correctly: it's not reusing stale content, and the 30 rounds were diverse enough that URL overlap across rounds was minimal.
 

@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from clients.openrouter import OpenRouterClientPool
 from config import EvalConfig
@@ -13,12 +13,27 @@ logger = logging.getLogger(__name__)
 class TestCaseDiagnosis:
     tc_id: str
     overall_score: float
+    passed: bool
     failure_dimensions: List[str]
+    
+    # Core diagnosis
     root_cause_summary: str
     coverage_diagnosis: str
     ranking_diagnosis: str
     scrape_diagnosis: str
     improvement_actions: List[str]
+
+    # Optional arrays
+    weak_dimensions: List[str] = field(default_factory=list)
+    floor_failures: List[str] = field(default_factory=list)
+    
+    # RL signal inputs
+    micro_pattern: Optional[dict] = None
+    dpo_rationale: Optional[str] = None
+    url_quality_annotations: List[dict] = field(default_factory=list)
+    
+    # Forwarded from Judge
+    criteria_summary: List[dict] = field(default_factory=list)
 
 @dataclass
 class RootCause:
@@ -65,8 +80,8 @@ class ImprovementAgent:
         
         # Histograms
         overall_scores = [e.overall_score for e in eval_results]
-        cov_scores = [e.coverage.recall_score for e in eval_results]
-        rank_scores = [e.ranking.ndcg_at_5 for e in eval_results]
+        cov_scores = [e.coverage_score for e in eval_results]
+        rank_scores = [e.ranking_score for e in eval_results]
         
         def compute_hist(scores):
             bins = [0, 0, 0, 0, 0]
@@ -87,8 +102,8 @@ class ImprovementAgent:
                 intent_stats[intent] = {"count": 0, "overall": 0.0, "coverage": 0.0, "ranking": 0.0}
             intent_stats[intent]["count"] += 1
             intent_stats[intent]["overall"] += res.overall_score
-            intent_stats[intent]["coverage"] += res.coverage.recall_score
-            intent_stats[intent]["ranking"] += res.ranking.ndcg_at_5
+            intent_stats[intent]["coverage"] += res.coverage_score
+            intent_stats[intent]["ranking"] += res.ranking_score
         for intent in intent_stats:
             c = intent_stats[intent]["count"]
             intent_stats[intent] = {
@@ -114,26 +129,30 @@ class ImprovementAgent:
                 "avg_overall": round(diff_stats[diff]["overall"] / c, 3)
             }
 
-        # Ranking disagreements
+        # Ranking disagreements and issues
         ranking_disagreements = []
         for res in eval_results:
-            ideal = res.ranking.llm_ideal_ranking
-            fc = res.ranking.firecrawl_ranking
-            if ideal and fc and ideal[0] != fc[0]:
-                tc = tc_dict[res.test_case_id]
-                ranking_disagreements.append({
-                    "tc_id": tc.id,
-                    "query": tc.query,
-                    "ideal_first_index": ideal[0],
-                    "firecrawl_first_index": fc[0],
-                    "reasoning": res.ranking.ranking_reasoning
-                })
+            tc = tc_dict[res.test_case_id]
+            for de in getattr(res, 'dimension_evals', []):
+                if any(kw in de.dimension_name.lower() for kw in ["ranking", "authority", "ordering"]):
+                    if de.score < 0.7 or de.contrastive_fail_triggered:
+                        ranking_disagreements.append({
+                            "tc_id": tc.id,
+                            "query": tc.query,
+                            "dimension": de.dimension_name,
+                            "score": de.score,
+                            "reasoning": de.reasoning,
+                            "contrastive_fail": de.contrastive_fail_explanation
+                        })
 
-        # Top coverage misses
+        # Top coverage criteria misses
         coverage_misses_counts = {}
         for res in eval_results:
-            for miss in res.coverage.must_mention_misses:
-                coverage_misses_counts[miss] = coverage_misses_counts.get(miss, 0) + 1
+            for de in getattr(res, 'dimension_evals', []):
+                for check in de.criteria_checklist:
+                    if check.status == "NOT_MET":
+                        cond_short = check.condition[:60]
+                        coverage_misses_counts[cond_short] = coverage_misses_counts.get(cond_short, 0) + 1
 
         # Best 3 TCs
         sorted_results = sorted(eval_results, key=lambda x: x.overall_score)
@@ -152,10 +171,12 @@ class ImprovementAgent:
             tc = tc_dict[res.test_case_id]
             worst_url = ""
             worst_sq_issues = []
-            if res.scrape_quality:
-                worst_sq = min(res.scrape_quality.items(), key=lambda x: x[1].overall_markdown_quality)
-                worst_url = worst_sq[0]
-                worst_sq_issues = [f"{i.type}: {i.detail}" for i in worst_sq[1].issues_found]
+            if getattr(res, 'document_profiles', None):
+                worst_p = min(res.document_profiles, key=lambda p: p.get("structure", {}).get("size", {}).get("total_words", 0))
+                worst_url = worst_p.get("url", "")
+            for de in getattr(res, 'dimension_evals', []):
+                if any(kw in de.dimension_name.lower() for kw in ["fidelity", "scrape", "structure"]):
+                    worst_sq_issues.extend([f"NOT_MET: {c.condition}" for c in de.criteria_checklist if c.status == "NOT_MET"])
                 
             worst_10.append({
                 "id": tc.id,
@@ -163,10 +184,12 @@ class ImprovementAgent:
                 "category": tc.category,
                 "intent": tc.intent,
                 "overall_score": res.overall_score,
-                "coverage_score": res.coverage.recall_score,
-                "coverage_misses": res.coverage.must_mention_misses,
-                "ranking_score": res.ranking.ndcg_at_5,
-                "ranking_suggestions": res.ranking.improvement_suggestions,
+                "coverage_score": res.coverage_score,
+                "ranking_score": res.ranking_score,
+                "dimensions": [
+                    {"name": de.dimension_name, "score": de.score, "level": de.assigned_level}
+                    for de in getattr(res, 'dimension_evals', [])
+                ],
                 "worst_scrape_url": worst_url,
                 "worst_scrape_issues": worst_sq_issues
             })
@@ -187,13 +210,18 @@ class ImprovementAgent:
         # Issue frequency
         issue_counts = {}
         for res in eval_results:
-            for sq in res.scrape_quality.values():
-                for issue in sq.issues_found:
-                    issue_counts[issue.type] = issue_counts.get(issue.type, 0) + 1
+            for de in getattr(res, 'dimension_evals', []):
+                for check in de.criteria_checklist:
+                    if check.status == "NOT_MET":
+                        issue_type = f"{de.dimension_name}_NOT_MET"
+                        issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+            for p in getattr(res, 'document_profiles', []):
+                for gap in p.get("content", {}).get("content_gaps_or_issues", []):
+                    issue_counts["Document_Gap"] = issue_counts.get("Document_Gap", 0) + 1
 
         avg_overall = sum(r.overall_score for r in eval_results) / max(1, len(eval_results))
-        avg_cov = sum(r.coverage.recall_score for r in eval_results) / max(1, len(eval_results))
-        avg_rank = sum(r.ranking.ndcg_at_5 for r in eval_results) / max(1, len(eval_results))
+        avg_cov = sum(r.coverage_score for r in eval_results) / max(1, len(eval_results))
+        avg_rank = sum(r.ranking_score for r in eval_results) / max(1, len(eval_results))
 
         import dataclasses
         return {
@@ -370,78 +398,131 @@ Output JSON schema:
     async def analyze_tc(self, test_case: TestCase, eval_result: EvalResult, search_results: List[FirecrawlSearchResult]) -> TestCaseDiagnosis:
         logger.info(f"Running TestCase level diagnosis for {test_case.id}...")
         
-        failure_dims = []
-        if eval_result.coverage.recall_score < self.config.pass_threshold:
-            failure_dims.append("coverage")
-        if eval_result.ranking.ndcg_at_5 < self.config.pass_threshold:
-            failure_dims.append("ranking")
-        avg_sq = sum(sq.overall_markdown_quality for sq in eval_result.scrape_quality.values()) / max(1, len(eval_result.scrape_quality))
-        if avg_sq < self.config.pass_threshold:
-            failure_dims.append("scrape")
+        passed = eval_result.passes(self.config.pass_threshold, getattr(self.config, 'dimension_floor', 0.40))
+        failure_dims = [
+            de.dimension_name for de in getattr(eval_result, 'dimension_evals', [])
+            if de.score < self.config.pass_threshold
+        ]
+        weak_dims = [
+            de.dimension_name for de in getattr(eval_result, 'dimension_evals', [])
+            if self.config.pass_threshold <= de.score < 0.80
+        ]
+        floor_fails = getattr(eval_result, "floor_failures", [])
             
-        # If score is fine, or no model is configured, return simple stub diagnosis
-        if not failure_dims or self.model == "PLACEHOLDER" or not self.model:
+        if self.model == "PLACEHOLDER" or not self.model:
             return TestCaseDiagnosis(
                 tc_id=test_case.id,
                 overall_score=eval_result.overall_score,
+                passed=passed,
                 failure_dimensions=failure_dims,
-                root_cause_summary="Fidelity is stable, minimal issues flagged." if not failure_dims else "Placeholder model mode.",
-                coverage_diagnosis="All required elements detected." if "coverage" not in failure_dims else "Missing must_mention items.",
-                ranking_diagnosis="Ideal order matches Firecrawl order." if "ranking" not in failure_dims else "Ideal order deviates from Firecrawl order.",
-                scrape_diagnosis="Scrape formatting is correct." if "scrape" not in failure_dims else "Markdown formatting issues detected.",
+                weak_dimensions=weak_dims,
+                floor_failures=floor_fails,
+                root_cause_summary="Placeholder model mode.",
+                coverage_diagnosis="Missing key claims.",
+                ranking_diagnosis="Ranking deviates from authoritative order.",
+                scrape_diagnosis="Markdown formatting issues detected.",
                 improvement_actions=[]
             )
             
-        # Call OpenRouter to diagnose this single TC
-        system_prompt = """You are a Search/IR diagnostics agent at Firecrawl. Given a single test case query and its scoring details, diagnose why the search or scrape failed and recommend 1-3 specific improvement actions.
+        if passed and not floor_fails:
+            system_prompt = """You are a Search/IR improvement analyst at Firecrawl. This test case PASSED evaluation, but even passing results have optimization opportunities. Analyze the near-miss dimensions, identify structural patterns that could regress under harder queries, and suggest proactive improvements.
+Output JSON schema:
+{
+  "root_cause_summary": "1-2 sentence description of near-misses or structural observations",
+  "coverage_diagnosis": "Explain what expected terms were missing or weakly represented",
+  "ranking_diagnosis": "Explain any minor ranking deviations",
+  "scrape_diagnosis": "Explain formatting/noise/completeness issues in crawled markdown",
+  "improvement_actions": ["concrete action 1", "concrete action 2"],
+  "micro_pattern": {
+    "pattern_type": "<short snake_case pattern name, e.g. table_flattening>",
+    "affected_dimension": "<fidelity|ranking|coverage|overall>",
+    "severity": "observation",
+    "description": "Concrete 1-2 sentence description of the pattern",
+    "suggested_fix": "Actionable engineering fix"
+  },
+  "dpo_rationale": "Rank X result (...) should be preferred over Rank Y (...) because...",
+  "url_quality_annotations": [
+    {"url": "<url>", "quality_score": <0.0 to 1.0>, "quality_note": "<short note>", "ideal_rank_suggestion": <int>}
+  ]
+}"""
+            prompt_header = "Find improvement opportunities for this PASSING test case:\n\n"
+        else:
+            system_prompt = """You are a Search/IR diagnostics agent at Firecrawl. This test case FAILED evaluation. Diagnose the root cause of each failing dimension, identify the specific structural or content issue in the document profiles, and recommend 1-3 concrete fix actions.
 Output JSON schema:
 {
   "root_cause_summary": "1-2 sentence description of main issue",
   "coverage_diagnosis": "Explain what expected terms were missing, if any",
   "ranking_diagnosis": "Explain why ranking diverged from ideal ranking, if any",
   "scrape_diagnosis": "Explain formatting/noise/completeness issues in crawled markdown, if any",
-  "improvement_actions": ["concrete action 1", "concrete action 2"]
+  "improvement_actions": ["concrete action 1", "concrete action 2"],
+  "micro_pattern": {
+    "pattern_type": "<short snake_case pattern name, e.g. table_flattening>",
+    "affected_dimension": "<fidelity|ranking|coverage|overall>",
+    "severity": "<critical|high|medium|low>",
+    "description": "Concrete 1-2 sentence description of the pattern",
+    "suggested_fix": "Actionable engineering fix"
+  },
+  "dpo_rationale": "Rank X result (...) should be preferred over Rank Y (...) because...",
+  "url_quality_annotations": [
+    {"url": "<url>", "quality_score": <0.0 to 1.0>, "quality_note": "<short note>", "ideal_rank_suggestion": <int>}
+  ]
 }"""
+            prompt_header = "Diagnose this FAILING test case:\n\n"
         
-        # Build clean search results info
-        sr_info = []
-        for r in search_results:
-            sq = eval_result.scrape_quality.get(r.url)
-            issues_str = ""
-            if sq:
-                issues_str = ", ".join(f"{i.type}: {i.detail}" for i in sq.issues_found)
-            sr_info.append({
-                "rank": r.firecrawl_rank,
-                "url": r.url,
-                "title": r.title,
-                "snippet": r.snippet[:200] if r.snippet else "",
-                "scrape_quality_score": sq.overall_markdown_quality if sq else 1.0,
-                "scrape_issues": issues_str
-            })
-            
         prompt_data = {
             "query": test_case.query,
             "category": test_case.category,
             "intent": test_case.intent,
             "difficulty": test_case.difficulty,
             "overall_score": eval_result.overall_score,
-            "coverage": {
-                "score": eval_result.coverage.recall_score,
-                "hits": eval_result.coverage.must_mention_hits,
-                "misses": eval_result.coverage.must_mention_misses,
-                "reasoning": eval_result.coverage.reasoning
-            },
-            "ranking": {
-                "score": eval_result.ranking.ndcg_at_5,
-                "firecrawl_ranking": eval_result.ranking.firecrawl_ranking,
-                "llm_ideal_ranking": eval_result.ranking.llm_ideal_ranking,
-                "reasoning": eval_result.ranking.ranking_reasoning,
-                "suggestions": eval_result.ranking.improvement_suggestions
-            },
-            "search_results": sr_info
+            "passed": passed,
+            "dimension_evals": [
+                {
+                    "name": de.dimension_name,
+                    "weight": de.weight,
+                    "score": de.score,
+                    "level": de.assigned_level,
+                    "reasoning": de.reasoning,
+                    "level_justification": de.level_justification,
+                    "contrastive_fail_triggered": de.contrastive_fail_triggered,
+                    "contrastive_fail_explanation": de.contrastive_fail_explanation,
+                    "evidence_found": de.evidence_found,
+                    "criteria_checklist": [
+                        {"condition": c.condition, "status": c.status, "evidence": c.evidence}
+                        for c in de.criteria_checklist
+                    ],
+                }
+                for de in getattr(eval_result, 'dimension_evals', [])
+            ],
+            "document_profiles": [
+                {k: v for k, v in p.items() if k not in ["completeness_last_200_chars"]}
+                for p in getattr(eval_result, 'document_profiles', [])
+            ],
+            "search_results": [
+                {
+                    "rank": r.firecrawl_rank,
+                    "url": r.url,
+                    "title": r.title,
+                    "snippet": (r.snippet or "")[:300],
+                    "query_cache_status": getattr(r, "query_cache_status", ""),
+                    "scrape_cache_status": getattr(r, "scrape_cache_status", ""),
+                    "content_drift": getattr(r, "content_drift", None),
+                    "kb_score": (getattr(r, "kb_meta", {}) or {}).get("kb_score"),
+                }
+                for r in search_results
+            ],
+            "result_diversity": getattr(eval_result, 'result_diversity', {}),
+            "warnings": getattr(eval_result, 'warnings', [])
         }
         
-        prompt = f"Diagnose this test case failure:\n\n{json.dumps(prompt_data, indent=2)}"
+        # Clean up repeated blocks to save tokens
+        for dp in prompt_data["document_profiles"]:
+            if "structure" in dp and "noise" in dp["structure"] and "repeated_blocks" in dp["structure"]["noise"]:
+                dp["structure"]["noise"]["repeated_blocks"] = dp["structure"]["noise"]["repeated_blocks"][:3]
+            if "completeness" in dp and "last_200_chars" in dp["completeness"]:
+                del dp["completeness"]["last_200_chars"]
+        
+        prompt = f"{prompt_header}{json.dumps(prompt_data, indent=2)}"
         
         try:
             raw_response = await self.or_pool.generate(
@@ -468,22 +549,42 @@ Output JSON schema:
                         clean_response = clean_response[start:end+1]
                         
             data = json.loads(clean_response)
+            
+            criteria_summary = []
+            for de in getattr(eval_result, 'dimension_evals', []):
+                for check in de.criteria_checklist:
+                    criteria_summary.append({
+                        "dimension": de.dimension_name,
+                        "condition": check.condition,
+                        "status": check.status
+                    })
+            
             return TestCaseDiagnosis(
                 tc_id=test_case.id,
                 overall_score=eval_result.overall_score,
+                passed=passed,
                 failure_dimensions=failure_dims,
+                weak_dimensions=weak_dims,
+                floor_failures=floor_fails,
                 root_cause_summary=data.get("root_cause_summary", "Unknown root cause"),
                 coverage_diagnosis=data.get("coverage_diagnosis", "N/A"),
                 ranking_diagnosis=data.get("ranking_diagnosis", "N/A"),
                 scrape_diagnosis=data.get("scrape_diagnosis", "N/A"),
-                improvement_actions=data.get("improvement_actions", [])
+                improvement_actions=data.get("improvement_actions", []),
+                micro_pattern=data.get("micro_pattern"),
+                dpo_rationale=data.get("dpo_rationale"),
+                url_quality_annotations=data.get("url_quality_annotations", []),
+                criteria_summary=criteria_summary
             )
         except Exception as e:
             logger.error(f"Failed to diagnose tc {test_case.id}: {e}")
             return TestCaseDiagnosis(
                 tc_id=test_case.id,
                 overall_score=eval_result.overall_score,
+                passed=passed,
                 failure_dimensions=failure_dims,
+                weak_dimensions=weak_dims,
+                floor_failures=floor_fails,
                 root_cause_summary=f"Analysis failed: {str(e)}",
                 coverage_diagnosis="N/A",
                 ranking_diagnosis="N/A",

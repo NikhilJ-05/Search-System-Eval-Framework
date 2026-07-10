@@ -79,11 +79,11 @@ class EmbedderClient:
             logger.error(f"BGE-M3 embedder warm-up failed: {e}")
             raise
 
-    async def get_embeddings(self, texts: List[str], max_length: int = 256) -> Tuple[List[List[float]], List[Dict[int, float]]]:
+    async def get_embeddings(self, texts: List[str], max_length: int = 512) -> Tuple[List[List[float]], List[Dict[int, float]]]:
         async with _embed_semaphore:
             return await asyncio.to_thread(_bge_m3_embedder.embed, texts, max_length)
 
-    async def embed_batched(self, texts: List[str], batch_size: int = 8, max_length: int = 512) -> Tuple[List[List[float]], List[Dict[int, float]]]:
+    async def embed_batched(self, texts: List[str], batch_size: int = 4, max_length: int = 8192) -> Tuple[List[List[float]], List[Dict[int, float]]]:
         """Embed all texts in small serialized mini-batches, logging progress and yielding control."""
         if not texts:
             return [], []

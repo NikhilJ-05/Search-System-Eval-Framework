@@ -2,10 +2,12 @@ import logging
 import time
 import json
 import uuid
+import asyncio
+import dataclasses
 from typing import List, Dict, Any, Optional, Tuple
 from clients.embedder import EmbedderClient
 from search_ir.qdrant_store import QdrantStore
-from qdrant_client.models import Prefetch, SparseVector, FusionQuery, Fusion, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Prefetch, SparseVector, FusionQuery, Fusion, PointStruct, Filter, FieldCondition, MatchValue, Range, FilterSelector
 from models.eval_result import FirecrawlSearchResult
 
 logger = logging.getLogger(__name__)
@@ -120,25 +122,38 @@ class Retriever:
             return None
 
         best_score = max(p.score for p in matching)
-        # Reassemble chunks in insertion order via scrape_timestamp + content
-        matching_sorted = sorted(matching, key=lambda p: p.payload.get("scrape_timestamp", 0))
-        full_content = "\n\n".join(p.payload.get("content", "") for p in matching_sorted)
-        oldest_ts = min(p.payload.get("scrape_timestamp", 0) for p in matching_sorted)
-        content_hash = matching_sorted[0].payload.get("content_hash", "")
+        
+        # We have a semantic hit! Now retrieve ALL chunks for this URL to reconstruct the FULL document.
+        # We cannot rely on `search_result` because it was limited to 10 chunks and ranked by relevance.
+        scroll_res, _ = await self.qdrant.client.scroll(
+            collection_name=self.qdrant.config.qdrant_collection,
+            scroll_filter=url_filter,
+            limit=10000,
+            with_payload=True
+        )
+        
+        if not scroll_res:
+            return None
+
+        # Reassemble all chunks in original page order via chunk_index
+        all_chunks_sorted = sorted(scroll_res, key=lambda p: p.payload.get("chunk_index", 0))
+        full_content = "\n\n".join(p.payload.get("content", "") for p in all_chunks_sorted)
+        oldest_ts = min(p.payload.get("scrape_timestamp", 0) for p in all_chunks_sorted)
+        doc_hash = all_chunks_sorted[0].payload.get("doc_content_hash", all_chunks_sorted[0].payload.get("content_hash", ""))
 
         return {
             "content": full_content,
             "scrape_timestamp": oldest_ts,
-            "content_hash": content_hash,
+            "content_hash": doc_hash,
             "url": url,
             "score": best_score,
-            "num_chunks": len(matching)
+            "num_chunks": len(all_chunks_sorted)
         }
 
     async def get_kb_content_for_url(self, query: str, url: str, score_threshold: float = 0.45) -> Optional[Dict]:
         """Hybrid BM25+vector search restricted to a specific URL.
-        Returns best-scored chunks reassembled into full_markdown if score >= threshold.
-        This is the semantic Layer 2: query-aware content retrieval, not just URL existence.
+        If any chunk scores above the threshold, fetches and reconstructs the FULL document.
+        This is the semantic Layer 2: query-aware hit detection, followed by full document retrieval.
         """
         if not self.qdrant.config.qdrant_url:
             return None
@@ -152,7 +167,9 @@ class Retriever:
         )
 
     async def get_kb_coverage_for_urls(
-        self, query: str, urls: List[str], score_threshold: float = 0.45
+        self, query: str, urls: List[str], score_threshold: float = 0.45,
+        precomputed_dense_vec: Optional[List[float]] = None,
+        precomputed_sparse_vec: Optional[Dict[int, float]] = None
     ) -> Dict[str, Optional[Dict]]:
         """Run get_kb_content_for_url for a list of URLs concurrently.
         Returns a dict of url → result (or None if no qualifying content).
@@ -160,11 +177,13 @@ class Retriever:
         if not self.qdrant.config.qdrant_url or not urls:
             return {url: None for url in urls}
 
-        import asyncio
-        # Embed query ONCE, reuse across all concurrent URL checks
-        dense_vecs, sparse_vecs = await self.embedder.get_embeddings([query])
-        dense_vector = dense_vecs[0]
-        sparse_vector = sparse_vecs[0] if sparse_vecs else None
+        if precomputed_dense_vec is not None:
+            dense_vector = precomputed_dense_vec
+            sparse_vector = precomputed_sparse_vec
+        else:
+            dense_vecs, sparse_vecs = await self.embedder.get_embeddings([query])
+            dense_vector = dense_vecs[0]
+            sparse_vector = sparse_vecs[0] if sparse_vecs else None
 
         tasks = [
             self._get_kb_content_for_url_with_vectors(dense_vector, sparse_vector, url, score_threshold)
@@ -175,15 +194,16 @@ class Retriever:
 
     async def find_similar_query(
         self, query: str, threshold: float = 0.92, max_age_seconds: int = 120
-    ) -> Tuple[Optional[Dict], Optional[List[float]]]:
+    ) -> Tuple[Optional[Dict], Optional[List[float]], Optional[Dict[int, float]]]:
         """Check if we've searched a near-identical query recently.
-        Returns a tuple of (hit_dict_or_None, query_dense_vector).
+        Returns a tuple of (hit_dict_or_None, query_dense_vector, query_sparse_vector).
         """
         if not self.qdrant.config.qdrant_url:
-            return None, None
+            return None, None, None
             
-        dense_vecs, _ = await self.embedder.get_embeddings([query])
+        dense_vecs, sparse_vecs = await self.embedder.get_embeddings([query])
         dense_vec = dense_vecs[0]
+        sparse_vec = sparse_vecs[0] if sparse_vecs else None
         
         results = await self.qdrant.client.query_points(
             collection_name="firecrawl_query_cache",
@@ -199,7 +219,6 @@ class Retriever:
             age = time.time() - point.payload.get("timestamp", 0)
             if age < max_age_seconds:
                 # deserialize results
-                import dataclasses
                 results_data = json.loads(point.payload.get("results", "[]"))
                 fc_results = []
                 for rd in results_data:
@@ -210,8 +229,8 @@ class Retriever:
                     "results": fc_results,
                     "similarity": point.score,
                     "age_seconds": age
-                }, dense_vec
-        return None, dense_vec
+                }, dense_vec, sparse_vec
+        return None, dense_vec, sparse_vec
 
     async def store_search_results(
         self, query: str, results: List[FirecrawlSearchResult], precomputed_dense_vec: Optional[List[float]] = None
@@ -220,7 +239,6 @@ class Retriever:
         if not self.qdrant.config.qdrant_url:
             return
             
-        import dataclasses
         if precomputed_dense_vec is not None:
             dense_vector = precomputed_dense_vec
         else:
@@ -246,3 +264,33 @@ class Retriever:
                 }
             )]
         )
+
+    async def evict_stale_query_cache(self, max_age_seconds: int) -> int:
+        """Evict query cache entries older than max_age_seconds."""
+        if not self.qdrant.config.qdrant_url:
+            return 0
+            
+        now = time.time()
+        cutoff = now - max_age_seconds
+        
+        logger.info(f"[Retriever] Scanning query cache for entries older than {max_age_seconds} seconds (cutoff timestamp < {cutoff:.0f})...")
+        
+        try:
+            res = await self.qdrant.client.delete(
+                collection_name="firecrawl_query_cache",
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="timestamp",
+                                range=Range(lt=cutoff)
+                            )
+                        ]
+                    )
+                )
+            )
+            logger.info(f"[Retriever] Query cache eviction complete. Status: {res}")
+            return 1
+        except Exception as e:
+            logger.warning(f"[Retriever] Failed to evict stale query cache: {e}")
+            return 0

@@ -18,43 +18,57 @@ class IndexStats:
     deduped: int
     total_chunks: int
 
-# Max chunks per document to keep indexing fast on CPU
-MAX_CHUNKS_PER_DOC = 5
-# Max chars of markdown to embed per document
-MAX_MARKDOWN_CHARS = 8000
-
 class Indexer:
     def __init__(self, qdrant: QdrantStore, embedder: EmbedderClient):
         self.qdrant = qdrant
         self.embedder = embedder
 
-    def _chunk_markdown(self, markdown: str) -> List[str]:
-        """Split markdown into chunks of ~2000 chars, capped at MAX_CHUNKS_PER_DOC."""
+    def _chunk_markdown(self, markdown: str, overlap_ratio: float = 0.15) -> List[str]:
+        """Adaptive chunker: no hard truncation. Chunk size scales with document length.
+        Overlap: ~15% of target chunk size carried over to the next chunk.
+        """
         if not markdown:
             return []
 
-        # Truncate early to avoid enormous embedding jobs
-        markdown = markdown[:MAX_MARKDOWN_CHARS]
+        doc_len = len(markdown)
+        # Scales target chunk size based on document length to keep chunk count reasonable:
+        # starts at 1500, adds 500 for every 10k characters, capped at 5000 chars.
+        target_chunk_size = min(5000, 1500 + (doc_len // 10000) * 500)
+        overlap_size = int(target_chunk_size * overlap_ratio)
 
+        lines = markdown.split('\n')
         chunks = []
-        current_chunk = ""
-        for line in markdown.split('\n'):
-            if line.startswith('#') and len(current_chunk) > 500:
-                chunks.append(current_chunk)
-                current_chunk = line + "\n"
-            else:
-                current_chunk += line + "\n"
+        current_lines = []
+        current_len = 0
+        overlap_tail = ""
 
-            if len(current_chunk) > 2000:
-                chunks.append(current_chunk)
-                current_chunk = ""
+        for line in lines:
+            line_len = len(line) + 1  # +1 for \n
 
-        if current_chunk:
-            chunks.append(current_chunk)
+            # Heading boundary: flush if current chunk is substantial (> 40% of target)
+            if line.startswith('#') and current_len > target_chunk_size * 0.4:
+                chunk_text = overlap_tail + '\n'.join(current_lines)
+                chunks.append(chunk_text)
+                overlap_tail = chunk_text[-overlap_size:] if len(chunk_text) > overlap_size else chunk_text
+                current_lines = [line]
+                current_len = line_len
+                continue
 
-        if len(chunks) > MAX_CHUNKS_PER_DOC:
-            logger.debug(f"[Indexer] Capping {len(chunks)} chunks → {MAX_CHUNKS_PER_DOC}")
-            chunks = chunks[:MAX_CHUNKS_PER_DOC]
+            current_lines.append(line)
+            current_len += line_len
+
+            if current_len >= target_chunk_size:
+                chunk_text = overlap_tail + '\n'.join(current_lines)
+                chunks.append(chunk_text)
+                overlap_tail = chunk_text[-overlap_size:] if len(chunk_text) > overlap_size else chunk_text
+                current_lines = []
+                current_len = 0
+
+        if current_lines or overlap_tail:
+            # Avoid writing an empty or duplicate chunk if nothing new was added
+            chunk_text = overlap_tail + '\n'.join(current_lines)
+            if chunk_text.strip() and chunk_text != overlap_tail:
+                chunks.append(chunk_text)
 
         return chunks
 
@@ -70,9 +84,11 @@ class Indexer:
             if not result.full_markdown:
                 continue
             chunks = self._chunk_markdown(result.full_markdown)
-            for chunk in chunks:
+            doc_hash = hashlib.sha256(result.full_markdown.encode()).hexdigest()
+            total_chunks = len(chunks)
+            for idx, chunk in enumerate(chunks):
                 chunks_to_embed.append(chunk)
-                chunk_metadata.append((chunk, result))
+                chunk_metadata.append((chunk, result, idx, total_chunks, doc_hash))
 
         if not chunks_to_embed:
             logger.info(f"[Indexer] No chunks to index for query: {repr(query[:60])}")
@@ -88,7 +104,7 @@ class Indexer:
         logger.info(f"[Indexer] Embeddings done in {elapsed:.1f}s")
 
         points = []
-        for i, (chunk, result) in enumerate(chunk_metadata):
+        for i, (chunk, result, chunk_idx, total_chunks, doc_hash) in enumerate(chunk_metadata):
             content_hash = hashlib.sha256(chunk.encode()).hexdigest()
             point_id = str(uuid.uuid4())
             points.append(
@@ -105,7 +121,10 @@ class Indexer:
                         "url": result.url,
                         "query_origin": query,
                         "content_hash": content_hash,
+                        "doc_content_hash": doc_hash,
                         "content": chunk,
+                        "chunk_index": chunk_idx,
+                        "total_chunks": total_chunks,
                         "scrape_timestamp": time.time()
                     }
                 )
@@ -150,31 +169,66 @@ class Indexer:
             
         stats = IndexStats(0, 0, 0, 0)
         chunks_to_embed = []
-        point_metadata = [] # stores (chunk_text, url, query_origin, content_hash)
+        point_metadata = [] # stores (chunk_text, url, query_origin, content_hash, doc_content_hash, chunk_index, total_chunks)
         
         logger.info(f"[Indexer] Processing batch of {len(new_entries)} new entries for dedup and indexing...")
         
+        # 1. Chunk all documents and compute hashes first
+        prepared_entries = []
+        all_chunk_hashes = []
         for url, markdown, query in new_entries:
             chunks = self._chunk_markdown(markdown)
             if not chunks:
                 continue
-                
-            stats.total_chunks += len(chunks)
-            for chunk in chunks:
+            doc_hash = hashlib.sha256(markdown.encode()).hexdigest()
+            total_chunks = len(chunks)
+            stats.total_chunks += total_chunks
+            
+            doc_chunks = []
+            for idx, chunk in enumerate(chunks):
                 content_hash = hashlib.sha256(chunk.encode()).hexdigest()
-                
-                # Check if hash already exists in Qdrant
-                existing, _ = await self.qdrant.client.scroll(
+                all_chunk_hashes.append(content_hash)
+                doc_chunks.append((chunk, content_hash, idx, total_chunks, doc_hash))
+            prepared_entries.append((url, query, doc_chunks))
+
+        # 2. Bulk retrieve existing hashes from Qdrant in a single scroll
+        existing_hashes = set()
+        if all_chunk_hashes:
+            try:
+                should_conditions = [FieldCondition(key="content_hash", match=MatchValue(value=h)) for h in all_chunk_hashes]
+                scroll_res, _ = await self.qdrant.client.scroll(
                     collection_name=self.qdrant.config.qdrant_collection,
-                    scroll_filter=Filter(must=[FieldCondition(key="content_hash", match=MatchValue(value=content_hash))]),
-                    limit=1
+                    scroll_filter=Filter(should=should_conditions),
+                    limit=len(all_chunk_hashes),
+                    with_payload=True,
+                    with_vectors=False
                 )
-                
-                if existing:
+                for point in scroll_res:
+                    if point.payload and "content_hash" in point.payload:
+                        existing_hashes.add(point.payload["content_hash"])
+            except Exception as e:
+                logger.warning(f"[Indexer] Batch dedup scroll failed: {e}. Falling back to full local scroll.")
+                try:
+                    scroll_res, _ = await self.qdrant.client.scroll(
+                        collection_name=self.qdrant.config.qdrant_collection,
+                        limit=1000,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    for point in scroll_res:
+                        if point.payload and "content_hash" in point.payload:
+                            existing_hashes.add(point.payload["content_hash"])
+                except Exception as ex:
+                    logger.error(f"[Indexer] Critical: fallback scroll failed: {ex}")
+
+        # 3. Filter out existing chunks locally
+        for url, query, doc_chunks in prepared_entries:
+            for chunk, content_hash, idx, total_chunks, doc_hash in doc_chunks:
+                if content_hash in existing_hashes:
                     stats.deduped += 1
                 else:
                     chunks_to_embed.append(chunk)
-                    point_metadata.append((chunk, url, query, content_hash))
+                    point_metadata.append((chunk, url, query, content_hash, doc_hash, idx, total_chunks))
                     
         if chunks_to_embed:
             logger.info(f"[Indexer] Batch embedding {len(chunks_to_embed)} new deduplicated chunks...")
@@ -184,7 +238,7 @@ class Indexer:
             logger.info(f"[Indexer] Batch embeddings done in {elapsed:.1f}s")
             
             points = []
-            for i, (chunk, url, query, content_hash) in enumerate(point_metadata):
+            for i, (chunk, url, query, content_hash, doc_hash, idx, total_chunks) in enumerate(point_metadata):
                 points.append(
                     PointStruct(
                         id=str(uuid.uuid4()),
@@ -199,7 +253,10 @@ class Indexer:
                             "url": url,
                             "query_origin": query,
                             "content_hash": content_hash,
+                            "doc_content_hash": doc_hash,
                             "content": chunk,
+                            "chunk_index": idx,
+                            "total_chunks": total_chunks,
                             "scrape_timestamp": time.time()
                         }
                     )

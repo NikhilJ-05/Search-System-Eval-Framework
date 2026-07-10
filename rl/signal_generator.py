@@ -17,160 +17,180 @@ class SignalGenerator:
     def __init__(self):
         self.patterns = []
 
-    def generate_signals(self, eval_results: List[EvalResult], search_results_dict: dict, test_cases: List[TestCase] = None) -> tuple:
-        logger.info("Generating RL signals from eval results...")
+    def generate_tc_signals(
+        self,
+        tc: TestCase,
+        eval_result: EvalResult,
+        search_results: List[FirecrawlSearchResult],
+        diagnosis: Any
+    ) -> tuple:
+        logger.info(f"Generating RL signals for TC {tc.id}...")
         dpo_pairs = []
         reward_signals = []
-        patterns = []
+        tc_pattern = None
 
-        tc_map = {tc.id: tc for tc in test_cases} if test_cases else {}
+        # Build url quality scores from LLM diagnosis
+        url_quality = {}
+        for ann in getattr(diagnosis, "url_quality_annotations", []):
+            url_quality[ann.get("url")] = ann.get("quality_score", 0.5)
 
-        for eval_res in eval_results:
-            tc_id = eval_res.test_case_id
-            search_res = search_results_dict.get(tc_id, [])
-            
-            # Simple heuristic for DPO pair generation based on judge's ideal ranking
-            ideal_rank = eval_res.ranking.llm_ideal_ranking
-            fc_rank = eval_res.ranking.firecrawl_ranking
-            
-            # Map url to its ideal rank position
-            url_to_ideal_rank = {}
-            for ideal_pos_0indexed, tc_index_1indexed in enumerate(ideal_rank):
-                if 1 <= tc_index_1indexed <= len(search_res):
-                    url = search_res[tc_index_1indexed - 1].url
-                    url_to_ideal_rank[url] = ideal_pos_0indexed + 1
+        sorted_by_quality = sorted(
+            search_results,
+            key=lambda r: url_quality.get(r.url, 0.5),
+            reverse=True
+        )
 
-            # Find a disagreement where ideal says X is better than Y, but FC said Y is better than X
-            if len(ideal_rank) >= 2 and len(fc_rank) >= 2 and len(search_res) >= max(ideal_rank + fc_rank):
-                try:
-                    if ideal_rank[0] != fc_rank[0]:
-                        chosen_idx = ideal_rank[0] - 1
-                        rejected_idx = fc_rank[0] - 1
-                        
-                        chosen_res = search_res[chosen_idx]
-                        rejected_res = search_res[rejected_idx]
-                        
-                        chosen_sq = eval_res.scrape_quality.get(chosen_res.url)
-                        rejected_sq = eval_res.scrape_quality.get(rejected_res.url)
-                        
-                        chosen_sq_val = chosen_sq.overall_markdown_quality if chosen_sq else 1.0
-                        rejected_sq_val = rejected_sq.overall_markdown_quality if rejected_sq else 0.7
-                        
-                        rejected_score = eval_res.overall_score * (rejected_sq_val / max(0.01, chosen_sq_val))
-                        rejected_score = min(rejected_score, eval_res.overall_score * 0.9) # cap at 90% of chosen
-                        
-                        dpo_pairs.append(
-                            DPOPair(
-                                query=chosen_res.query,
-                                chosen=DPOVariant(
-                                    url=chosen_res.url,
-                                    content_snippet=chosen_res.full_markdown[:500] if chosen_res.full_markdown else "",
-                                    firecrawl_rank=fc_rank[0],
-                                    judge_score=eval_res.overall_score
-                                ),
-                                rejected=DPOVariant(
-                                    url=rejected_res.url,
-                                    content_snippet=rejected_res.full_markdown[:500] if rejected_res.full_markdown else "",
-                                    firecrawl_rank=rejected_res.firecrawl_rank,  # FIX: was incorrectly using chosen_res
-                                    judge_score=rejected_score
-                                ),
-                                preference_rationale=eval_res.ranking.ranking_reasoning
-                            )
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to generate DPO for tc {tc_id}: {e}")
+        url_to_ideal_rank = {r.url: i + 1 for i, r in enumerate(sorted_by_quality)}
 
-            # Reward signals
-            for sr in search_res:
-                sq = eval_res.scrape_quality.get(sr.url)
-                if sq:
-                    ideal_pos = url_to_ideal_rank.get(sr.url, sr.firecrawl_rank)
-
-                    # Freshness: exponential decay from kb_meta age (10-min half-life).
-                    # Falls back to 1.0 if no KB metadata (live scrape = maximally fresh).
-                    kb_meta = getattr(sr, "kb_meta", None)
-                    if kb_meta and kb_meta.get("age_s") is not None:
-                        freshness = max(0.1, math.exp(-kb_meta["age_s"] / 600.0))
-                    else:
-                        freshness = 1.0
-
-                    relevance = eval_res.coverage.recall_score
-                    completeness = sq.completeness_score
-                    markdown_quality = sq.overall_markdown_quality
-
-                    # Weighted composite: relevance 35%, markdown quality 30%, completeness 20%, freshness 15%
-                    composite = (
-                        0.35 * relevance
-                        + 0.30 * markdown_quality
-                        + 0.20 * completeness
-                        + 0.15 * freshness
-                    )
-
-                    reward_signals.append(
-                        RewardSignal(
-                            query=sr.query,
-                            url=sr.url,
-                            reward_components=RewardComponents(
-                                relevance=relevance,
-                                completeness=completeness,
-                                freshness=freshness,
-                                markdown_quality=markdown_quality
+        # DPO Pair
+        if len(sorted_by_quality) >= 2 and len(search_results) >= 2:
+            try:
+                best_res = sorted_by_quality[0]
+                fc_top_res = search_results[0]
+                if best_res.url != fc_top_res.url:
+                    dpo_pairs.append(
+                        DPOPair(
+                            query=tc.query,
+                            test_case_id=tc.id,
+                            chosen=DPOVariant(
+                                url=best_res.url,
+                                content_snippet=best_res.full_markdown[:500] if best_res.full_markdown else "",
+                                firecrawl_rank=best_res.firecrawl_rank,
+                                judge_score=eval_result.overall_score
                             ),
-                            composite_reward=round(composite, 4),
-                            trajectory=Trajectory(
-                                search_rank=sr.firecrawl_rank,
-                                ideal_rank=ideal_pos,
-                                rank_delta=ideal_pos - sr.firecrawl_rank
-                            )
+                            rejected=DPOVariant(
+                                url=fc_top_res.url,
+                                content_snippet=fc_top_res.full_markdown[:500] if fc_top_res.full_markdown else "",
+                                firecrawl_rank=fc_top_res.firecrawl_rank,
+                                judge_score=eval_result.overall_score * 0.8
+                            ),
+                            preference_rationale=getattr(diagnosis, "dpo_rationale", "Derived from LLM quality annotations"),
+                            dimension_context="overall"
                         )
                     )
+            except Exception as e:
+                logger.warning(f"Failed to generate DPO for tc {tc.id}: {e}")
 
-        # Dynamic patterns grouped by category + intent
-        group_scores = {}
-        for res in eval_results:
-            tc = tc_map.get(res.test_case_id)
-            if not tc: continue
-            key = (tc.category, tc.intent)
-            if key not in group_scores:
-                group_scores[key] = []
-            group_scores[key].append(res)
+        # Reward Signals
+        for sr in search_results:
+            ideal_pos = url_to_ideal_rank.get(sr.url, sr.firecrawl_rank)
+            kb_meta = getattr(sr, "kb_meta", None)
+            if kb_meta and kb_meta.get("age_s") is not None:
+                freshness = max(0.1, math.exp(-kb_meta["age_s"] / 600.0))
+            else:
+                freshness = 1.0
+
+            relevance = eval_result.overall_score
+            llm_quality = url_quality.get(sr.url, 0.5)
             
-        for (category, intent), results in group_scores.items():
-            avg_score = sum(r.overall_score for r in results) / len(results)
-            # If the group has sub-par performance, generate a targeted pattern
-            if avg_score < 0.8:
-                # Find most common scrape issue in this group
-                issue_freqs = {}
-                for r in results:
-                    for sq in r.scrape_quality.values():
-                        for issue in sq.issues_found:
-                            issue_freqs[issue.type] = issue_freqs.get(issue.type, 0) + 1
-                most_common_issue = "markdown_fidelity"
-                if issue_freqs:
-                    most_common_issue = max(issue_freqs.items(), key=lambda x: x[1])[0]
-                    
-                patterns.append(
-                    ImprovementPattern(
-                        issue=f"{category}_{intent}_{most_common_issue}",
-                        frequency=f"{len(results)} queries",
-                        description=f"Performance bottleneck on intent '{intent}' in category '{category}' with common issue: '{most_common_issue}' (Avg score: {avg_score:.2f})",
-                        suggested_fix=f"Add custom extraction selectors and metadata tags to mitigate '{most_common_issue}'"
-                    )
-                )
-                
-        # Default fallback pattern if no failing groups
-        if not patterns:
-            patterns.append(
-                ImprovementPattern(
-                    issue="general_stability",
-                    frequency="All TCs passed",
-                    description="Evaluation pipeline overall score is stable.",
-                    suggested_fix="Maintain current selector configurations."
+            # Content completeness
+            completeness = 0.5
+            authority = 0.0
+            if getattr(eval_result, "document_profiles", None):
+                for p in eval_result.document_profiles:
+                    if p.get("url") == sr.url:
+                        comp_str = p.get("content", {}).get("content_completeness", "unknown")
+                        if comp_str == "complete": completeness = 1.0
+                        elif comp_str == "partial": completeness = 0.7
+                        elif comp_str == "appears_truncated": completeness = 0.4
+                        elif comp_str == "navigation_only": completeness = 0.1
+                        elif comp_str == "error_page": completeness = 0.0
+                        
+                        dom_type = p.get("structure", {}).get("domain_type", p.get("domain_type", "unknown"))
+                        auth_sigs = p.get("content", {}).get("authority_signals", [])
+                        if dom_type in ["authoritative", "academic"]:
+                            authority = 1.0
+                        elif auth_sigs:
+                            authority = 0.5
+
+            composite = (
+                0.30 * relevance
+                + 0.25 * llm_quality
+                + 0.20 * completeness
+                + 0.15 * freshness
+                + 0.10 * authority
+            )
+
+            diag_note = ""
+            for ann in getattr(diagnosis, "url_quality_annotations", []):
+                if ann.get("url") == sr.url:
+                    diag_note = ann.get("quality_note", "")
+
+            reward_signals.append(
+                RewardSignal(
+                    query=tc.query,
+                    test_case_id=tc.id,
+                    url=sr.url,
+                    reward_components=RewardComponents(
+                        relevance=relevance,
+                        completeness=completeness,
+                        freshness=freshness,
+                        markdown_quality=llm_quality,
+                        authority=authority
+                    ),
+                    composite_reward=round(composite, 4),
+                    trajectory=Trajectory(
+                        search_rank=sr.firecrawl_rank,
+                        ideal_rank=ideal_pos,
+                        rank_delta=ideal_pos - sr.firecrawl_rank
+                    ),
+                    diagnostic_notes=diag_note
                 )
             )
 
-        self.patterns = patterns
-        return dpo_pairs, reward_signals, patterns
+        # Micro Pattern
+        if getattr(diagnosis, "micro_pattern", None):
+            mp = diagnosis.micro_pattern
+            if isinstance(mp, dict):
+                from models.rl_signal import TCMicroPattern
+                tc_pattern = TCMicroPattern(
+                    test_case_id=tc.id,
+                    pattern_type=mp.get("pattern_type", "unknown"),
+                    affected_dimension=mp.get("affected_dimension", "unknown"),
+                    severity=mp.get("severity", "medium"),
+                    description=mp.get("description", ""),
+                    suggested_fix=mp.get("suggested_fix", "")
+                )
+
+        return dpo_pairs, reward_signals, tc_pattern
+
+    def aggregate_patterns(
+        self,
+        micro_patterns: List[Any],
+        eval_results: List[EvalResult],
+        test_cases: List[TestCase]
+    ) -> List[ImprovementPattern]:
+        logger.info("Aggregating RL micro-patterns...")
+        patterns = []
+        
+        grouping = {}
+        for mp in micro_patterns:
+            ptype = getattr(mp, "pattern_type", "unknown")
+            if ptype not in grouping:
+                grouping[ptype] = []
+            grouping[ptype].append(mp)
+            
+        for ptype, mps in grouping.items():
+            affected_tcs = [getattr(mp, "test_case_id") for mp in mps]
+            
+            # Severity resolution (take highest severity)
+            sev_levels = {"critical": 4, "high": 3, "medium": 2, "low": 1, "observation": 0}
+            max_sev = max(mps, key=lambda x: sev_levels.get(getattr(x, "severity", "medium"), 2))
+            severity = getattr(max_sev, "severity", "medium")
+            
+            patterns.append(
+                ImprovementPattern(
+                    issue=ptype,
+                    frequency=f"{len(mps)} TCs",
+                    description=getattr(mps[0], "description", ""),
+                    suggested_fix=getattr(mps[0], "suggested_fix", ""),
+                    severity=severity,
+                    affected_tcs=affected_tcs
+                )
+            )
+            
+        self.patterns = sorted(patterns, key=lambda p: len(p.affected_tcs), reverse=True)
+        return self.patterns
 
     def update_patterns(self, enhanced_patterns: List[dict]):
         if enhanced_patterns:

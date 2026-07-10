@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import json
+import hashlib
 import dataclasses
 from datetime import datetime
 from typing import List, Dict, Tuple
@@ -12,6 +13,7 @@ from clients.firecrawl_client import FirecrawlClientPool
 from clients.embedder import EmbedderClient
 from search_ir.qdrant_store import QdrantStore
 from eval.test_generator import TestGenerator
+from eval.test_case_history import TestCaseHistory
 from eval.judge import Judge
 from search_ir.indexer import Indexer, IndexStats
 from search_ir.retriever import Retriever
@@ -40,15 +42,25 @@ class Orchestrator:
         self.qdrant = QdrantStore(config)
         
         self.generator = TestGenerator(config, self.or_pool)
+        self.history = TestCaseHistory()
         self.judge = Judge(config, self.or_pool)
         self.indexer = Indexer(self.qdrant, self.embedder)
         self.retriever = Retriever(self.qdrant, self.embedder)
-        self.comparator = RankingComparator()
-        self.signal_gen = SignalGenerator()
-        self.report_builder = ReportBuilder()
-        self.regression = RegressionDetector()
-        self.calibration = JudgeCalibration()
+        
+        self.comparator = RankingComparator(config, self.or_pool)
+        self.signal_gen = SignalGenerator(config)
+        self.report_builder = ReportBuilder(config)
+        self.regression_detector = RegressionDetector()
         self.improvement_agent = ImprovementAgent(config, self.or_pool)
+        self._background_tasks = []
+        self.calibration = JudgeCalibration()
+        
+        self.live_tc_diagnoses = []
+        self.live_dpo_pairs = []
+        self.live_reward_signals = []
+        self.live_micro_patterns = []
+        self.live_eval_results = []
+        self.live_test_cases = []
 
     def _emit_event(self, event_data: dict):
         q = sse_queue_var.get()
@@ -133,7 +145,7 @@ class Orchestrator:
             tc_new_entries = []
 
             # Layer 1: Query Cache
-            cached_query, query_dense_vec = await self.retriever.find_similar_query(
+            cached_query, query_dense_vec, query_sparse_vec = await self.retriever.find_similar_query(
                 tc.query, 
                 threshold=self.config.query_cache_similarity_threshold,
                 max_age_seconds=self.config.kb_freshness_window_seconds * 10
@@ -152,8 +164,8 @@ class Orchestrator:
                 for r in fc_results:
                     r.query_cache_status = "miss"
                 
-                # Save to query cache
-                await self.retriever.store_search_results(tc.query, fc_results, precomputed_dense_vec=query_dense_vec)
+                # Save to query cache in background
+                asyncio.create_task(self.retriever.store_search_results(tc.query, fc_results, precomputed_dense_vec=query_dense_vec))
                 self._emit_event({"type": "firecrawl_search_done", "tc_id": tc.id, "result_count": len(fc_results), "latency_ms": search_lat})
 
             # Layer 2: KB Hybrid Content Search (BM25 + Vector semantic per URL)
@@ -171,7 +183,9 @@ class Orchestrator:
                 kb_coverage = await self.retriever.get_kb_coverage_for_urls(
                     query=tc.query,
                     urls=top_urls,
-                    score_threshold=self.config.kb_content_score_threshold
+                    score_threshold=self.config.kb_content_score_threshold,
+                    precomputed_dense_vec=query_dense_vec,
+                    precomputed_sparse_vec=query_sparse_vec
                 )
 
                 scrape_tasks = []
@@ -233,7 +247,6 @@ class Orchestrator:
                                 tc_new_entries.append((res.url, md, tc.query))
                                 
                                 if res.scrape_cache_status == "stale":
-                                    import hashlib
                                     new_hash = hashlib.sha256(md.encode()).hexdigest()
                                     res.content_drift = {
                                         "changed": new_hash != res.kb_meta["old_hash"],
@@ -259,26 +272,23 @@ class Orchestrator:
             eval_results.append(eval_res)
             logger.info(
                 f"[Pipeline] [{tc.id}] Judge: overall={eval_res.overall_score:.3f} "
-                f"cov={eval_res.coverage.recall_score:.3f} rnk={eval_res.ranking.ndcg_at_5:.3f}"
+                f"cov={eval_res.coverage_score:.3f} rnk={eval_res.ranking_score:.3f} "
+                f"dims={len(eval_res.dimension_evals)}"
             )
 
-            logger.info(f"[Pipeline] [{tc.id}] Running live diagnostic analysis...")
-            diag = await self.improvement_agent.analyze_tc(tc, eval_res, fc_results)
-            if hasattr(self, 'live_tc_diagnoses'):
-                self.live_tc_diagnoses.append(diag)
+            # Kick off live diagnostic analysis and reporting in the background
+            task = asyncio.create_task(self._post_judge_pipeline(tc, eval_res, fc_results, self.current_run_id))
+            self._background_tasks.append(task)
 
-            if hasattr(self, 'current_run_id') and self.current_run_id:
-                await self.report_builder.build_single_tc_report_async(
-                    self.current_run_id, tc, eval_res, fc_results, diag, self.config.pass_threshold
-                )
-                await self._save_live_run(self.current_run_id, getattr(self, 'live_test_cases', []), eval_results, getattr(self, 'live_tc_diagnoses', []))
+            # Persist successfully processed test case to the test case history store
+            self.history.append(tc)
 
             self._emit_event({
                 "type": "judge_scored",
                 "tc_id": tc.id,
-                "coverage": eval_res.coverage.recall_score,
-                "ranking": eval_res.ranking.ndcg_at_5,
-                "scrape": sum(sq.overall_markdown_quality for sq in eval_res.scrape_quality.values()) / max(1, len(eval_res.scrape_quality)),
+                "coverage": eval_res.coverage_score,
+                "ranking": eval_res.ranking_score,
+                "scrape": eval_res.fidelity_score,
                 "overall": eval_res.overall_score,
                 "has_report": True
             })
@@ -298,6 +308,45 @@ class Orchestrator:
                 return index_stats
             return None
 
+    async def _post_judge_pipeline(self, tc: TestCase, eval_res: EvalResult, search_results: List[FirecrawlSearchResult], run_id: str):
+        """Background chain: diagnosis → RL signals → report."""
+        try:
+            # Step 1: LLM diagnosis
+            diagnosis = await self.improvement_agent.analyze_tc(tc, eval_res, search_results)
+            self.live_tc_diagnoses.append(diagnosis)
+            
+            # Step 2: Programmatic RL signals
+            tc_dpo, tc_rewards, tc_pattern = self.signal_gen.generate_tc_signals(
+                tc, eval_res, search_results, diagnosis
+            )
+            if tc_dpo:
+                self.live_dpo_pairs.extend(tc_dpo)
+            if tc_rewards:
+                self.live_reward_signals.extend(tc_rewards)
+            if tc_pattern:
+                self.live_micro_patterns.append(tc_pattern)
+            
+            # Step 3: Per-TC report
+            await self.report_builder.build_single_tc_report_async(
+                run_id, tc, eval_res, search_results, diagnosis, self.config.pass_threshold
+            )
+            
+            # Step 4: Emit SSE + save live state
+            self._emit_event({
+                "type": "tc_diagnosis_complete", 
+                "tc_id": tc.id,
+                "passed": getattr(diagnosis, 'passed', False),
+                "micro_pattern": diagnosis.micro_pattern.get("pattern_type") if diagnosis.micro_pattern else None,
+                "improvement_actions_count": len(diagnosis.improvement_actions) if hasattr(diagnosis, 'improvement_actions') else 0
+            })
+            
+            # Update live lists before saving
+            self.live_eval_results = [r for r in self.live_eval_results if r.test_case_id != eval_res.test_case_id] + [eval_res]
+            await self._save_live_run(run_id, self.live_test_cases, self.live_eval_results, self.live_tc_diagnoses)
+            
+        except Exception as e:
+            logger.error(f"Post-judge pipeline failed for TC {tc.id}: {e}")
+
     async def run_pipeline(self, run_id: str = None) -> str:
         if not run_id:
             run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -311,6 +360,11 @@ class Orchestrator:
                 self.qdrant.init_collection(),
                 self.qdrant.init_query_cache_collection(),
                 self.embedder.warmup()
+            )
+            
+            # Evict stale query cache entries
+            await self.retriever.evict_stale_query_cache(
+                max_age_seconds=self.config.query_cache_eviction_max_age_seconds
             )
 
             # Phase 3.5: Calibration (pre-flight) skipped by request
@@ -330,95 +384,66 @@ class Orchestrator:
             round_stats = []
 
             total_needed = self.config.num_test_cases
-            batch_size = self.config.batch_size
+            semaphore = asyncio.Semaphore(1)
 
-            max_concurrent = min(
-                len(self.fc_pool._clients) if hasattr(self.fc_pool, '_clients') else 10,
-                len(self.or_pool._clients) if hasattr(self.or_pool, '_clients') else 10,
-                batch_size,
-                self.config.max_concurrent_tcs
-            )
-            semaphore = asyncio.Semaphore(max_concurrent)
-
-            r_num = 0
-            while len(all_eval_results) < total_needed:
-                r_num += 1
-                remaining = total_needed - len(all_eval_results)
-                this_batch = min(batch_size, remaining)
-
-                # --- Generate TCs for this round using full accumulated history ---
-                previous_queries = [tc.query for tc in all_test_cases]
-                previous_urls = await self._fetch_previous_urls()
-
-                logger.info(f"=== ROUND {r_num} — generating {this_batch} TC(s) "
-                            f"(history: {len(previous_queries)} queries, {len(previous_urls)} KB URLs) ===")
+            for i in range(total_needed):
+                # --- Generate TC ---
+                logger.info(f"=== Session Progress — generating TC {i+1}/{total_needed} ===")
                 self._emit_event({"type": "phase_start", "phase": "test_generation",
-                                  "message": f"Round {r_num}: Generating {this_batch} test case(s)..."})
+                                  "message": f"Generating TC {i+1}/{total_needed}..."})
 
-                new_tcs = await self.generator.generate(this_batch, previous_queries, previous_urls)
+                new_tcs = await self.generator.generate(1)
                 if not new_tcs:
-                    logger.warning(f"[Orchestrator] Round {r_num}: Generator returned 0 TCs — stopping early.")
+                    logger.warning(f"[Orchestrator] Generator returned 0 TCs — stopping early.")
                     break
+                tc = new_tcs[0]
 
-                all_test_cases.extend(new_tcs)
+                all_test_cases.append(tc)
                 self.live_test_cases = all_test_cases
-                for tc in new_tcs:
-                    self._emit_event({"type": "test_case_created", "tc_id": tc.id, "query": tc.query})
+                self._emit_event({"type": "test_case_created", "tc_id": tc.id, "query": tc.query})
+                
                 # Persist so a restart can resume from where we left off
                 await self._persist_test_cases_async(all_test_cases)
 
-                # --- Execute this round ---
+                # --- Execute this TC ---
                 self._emit_event({"type": "phase_start", "phase": "execution",
-                                  "message": f"Round {r_num}: Executing {len(new_tcs)} test case(s)..."})
-                tc_tasks = [
-                    self._process_tc(tc, idx, len(new_tcs), r_num,
+                                  "message": f"Executing TC {i+1}/{total_needed}..."})
+                
+                result = await self._process_tc(tc, i, total_needed, i+1,
                                      all_search_results, all_eval_results, semaphore)
-                    for idx, tc in enumerate(new_tcs)
-                ]
-                # gather() here waits for ALL processing (including indexing) to finish
-                # before the next round generates new TCs — ensuring the KB is fully
-                # up-to-date when history-based variants are created.
-                results = await asyncio.gather(*tc_tasks)
-
-                round_new_indexed = sum(s.new_indexed for s in results if s)
-                round_deduped = sum(s.deduped for s in results if s)
-                self._emit_event({"type": "round_complete", "round": r_num,
-                                  "new_indexed": round_new_indexed, "deduped": round_deduped})
+                
+                new_indexed = result.new_indexed if result else 0
+                deduped = result.deduped if result else 0
+                
+                self._emit_event({"type": "round_complete", "round": i+1,
+                                  "new_indexed": new_indexed, "deduped": deduped})
                 round_stats.append({
-                    "round": r_num,
-                    "tcs_processed": len(new_tcs),
-                    "new_indexed_docs": round_new_indexed,
-                    "deduped_docs": round_deduped
+                    "round": i+1,
+                    "tcs_processed": 1,
+                    "new_indexed_docs": new_indexed,
+                    "deduped_docs": deduped
                 })
-                logger.info(f"=== ROUND {r_num} complete — {len(all_eval_results)}/{total_needed} TCs done ===")
+                logger.info(f"=== Session Progress — {len(all_eval_results)}/{total_needed} TCs complete ===")
 
-            # Phase 6: RL Signals (independent of indexing)
+            # Wait for all background diagnostics/reports to finish before proceeding to RL Signals
+            if self._background_tasks:
+                logger.info(f"[Pipeline] Waiting for {len(self._background_tasks)} background diagnostic tasks to complete...")
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                self._background_tasks.clear()
+
+            # Phase 6: Aggregate per-TC micro-patterns into run-level taxonomy
             self._emit_event({"type": "phase_start", "phase": "rl_signals"})
-            dpo_pairs, reward_signals, patterns = self.signal_gen.generate_signals(all_eval_results, all_search_results, all_test_cases)
-            self._emit_event({"type": "phase_complete", "phase": "rl_signals", "dpo_pairs": len(dpo_pairs)})
-
-            # Level 1: Use per-TC diagnoses already computed live during execution
-            self._emit_event({"type": "phase_start", "phase": "tc_diagnostics", "message": "Finalizing individual test case diagnoses..."})
-            tc_diagnoses = getattr(self, 'live_tc_diagnoses', [])
-            if len(tc_diagnoses) < len(all_eval_results):
-                tc_diag_tasks = []
-                tc_map = {tc.id: tc for tc in all_test_cases}
-                for res in all_eval_results:
-                    tc = tc_map[res.test_case_id]
-                    if not any(d.tc_id == tc.id for d in tc_diagnoses):
-                        tc_diag_tasks.append(self.improvement_agent.analyze_tc(tc, res, all_search_results.get(tc.id, [])))
-                if tc_diag_tasks:
-                    tc_diagnoses.extend(await asyncio.gather(*tc_diag_tasks))
-
-            # Generate per-TC individual markdown reports in parallel (independent of indexing)
-            tc_report_paths = await self.report_builder.build_tc_reports_async(
-                run_id=run_id,
-                test_cases=all_test_cases,
-                eval_results=all_eval_results,
-                search_results_dict=all_search_results,
-                tc_diagnoses=tc_diagnoses,
-                pass_threshold=self.config.pass_threshold
+            patterns = self.signal_gen.aggregate_patterns(
+                self.live_micro_patterns, all_eval_results, all_test_cases
             )
+            self._emit_event({"type": "phase_complete", "phase": "rl_signals", "dpo_pairs": len(self.live_dpo_pairs)})
+
+            # tc_diagnoses is now completely populated from background tasks
+            tc_diagnoses = self.live_tc_diagnoses
+            tc_report_paths = [
+                os.path.join(APP_DIR, "outputs", "runs", run_id, "reports", "tc_reports", f"{tc.id}.md")
+                for tc in all_test_cases
+            ]
 
             # Phase 6.5: Improvement Analysis (Level 2 Synthesis)
             self._emit_event({"type": "phase_start", "phase": "improvement_analysis"})
@@ -431,7 +456,7 @@ class Orchestrator:
             
             # Feed enhanced patterns back into RL signals
             self.signal_gen.update_patterns(improvement_analysis.enhanced_patterns)
-            await self.signal_gen.save_signals_async(dpo_pairs, reward_signals, self.signal_gen.patterns, run_id)
+            await self.signal_gen.save_signals_async(self.live_dpo_pairs, self.live_reward_signals, self.signal_gen.patterns, run_id)
 
             # Final round indexing is already complete since we gather and await all _process_tc tasks per round
             pass
@@ -448,10 +473,10 @@ class Orchestrator:
 
             # Phase 7: Report & Regression
             self._emit_event({"type": "phase_start", "phase": "report"})
-            reg_data = self.regression.detect(run_id, all_eval_results)
+            reg_data = self.regression_detector.detect(run_id, all_eval_results)
             rl_summary = {
-                "dpo_pairs": len(dpo_pairs),
-                "reward_signals": len(reward_signals),
+                "dpo_pairs": len(self.live_dpo_pairs),
+                "reward_signals": len(self.live_reward_signals),
                 "patterns": self.signal_gen.patterns
             }
             

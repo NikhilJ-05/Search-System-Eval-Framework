@@ -58,16 +58,9 @@ class ReportBuilder:
             return md + "No evaluation results."
             
         avg_overall = sum(e.overall_score for e in eval_results) / len(eval_results)
-        avg_cov = sum(e.coverage.recall_score for e in eval_results) / len(eval_results)
-        avg_rank = sum(e.ranking.ndcg_at_5 for e in eval_results) / len(eval_results)
-        
-        avg_scrape = 0
-        scrape_count = 0
-        for e in eval_results:
-            for sq in e.scrape_quality.values():
-                avg_scrape += sq.overall_markdown_quality
-                scrape_count += 1
-        avg_scrape = avg_scrape / scrape_count if scrape_count else 0
+        avg_cov = sum(e.coverage_score for e in eval_results) / len(eval_results)
+        avg_rank = sum(e.ranking_score for e in eval_results) / len(eval_results)
+        avg_scrape = sum(e.fidelity_score for e in eval_results) / len(eval_results)
         
         passed_count = sum(1 for e in eval_results if e.overall_score >= 0.8)
         failed_count = len(eval_results) - passed_count
@@ -76,7 +69,7 @@ class ReportBuilder:
         md += "## Executive Summary\n"
         md += f"- **Overall Score**: {avg_overall:.2f} {status_icon}\n"
         md += f"- **Test Cases**: {len(eval_results)} | Passed: {passed_count} | Failed: {failed_count}\n"
-        md += f"- **Coverage**: {avg_cov:.2f} | **Ranking**: {avg_rank:.2f} | **Scrape Quality**: {avg_scrape:.2f}\n\n"
+        md += f"- **Coverage**: {avg_cov:.2f} | **Ranking**: {avg_rank:.2f} | **Fidelity**: {avg_scrape:.2f}\n\n"
         
         if improvement_analysis and getattr(improvement_analysis, 'root_causes', []):
             primary_rc = improvement_analysis.root_causes[0].title
@@ -153,17 +146,17 @@ class ReportBuilder:
             
             for res in eval_results:
                 tc = next(t for t in test_cases if t.id == res.test_case_id)
-                ideal = res.ranking.llm_ideal_ranking
                 fc_urls = [r.url for r in search_results_dict.get(tc.id, [])]
                 kb_urls = kb_rankings.get(tc.id, [])
-                
-                # convert ideal index to urls (assuming ideal index aligns with fc_urls initially)
-                # LLM output is 1-indexed.
-                ideal_urls = []
-                for idx in ideal:
-                    if 1 <= idx <= len(fc_urls):
-                        ideal_urls.append(fc_urls[idx-1])
-                        
+
+                # Derive ideal URL order from document profiles: highest key_claims density = most valuable result
+                profiles = getattr(res, 'document_profiles', [])
+                ideal_urls = [p.get('url', '') for p in sorted(
+                    profiles,
+                    key=lambda p: len(p.get('content', {}).get('key_claims', [])),
+                    reverse=True
+                )] if profiles else fc_urls  # fallback to fc order if no profiles
+
                 comp = comparator.compare(fc_urls, ideal_urls, kb_urls)
                 fc_taus.append(comp["fc_vs_ideal"]["kendall_tau"])
                 kb_taus.append(comp["kb_vs_ideal"]["kendall_tau"])
@@ -232,6 +225,18 @@ class ReportBuilder:
             md += "## RL Training Signals\n"
             md += f"- **DPO Pairs Generated**: {rl_summary.get('dpo_pairs', 0)}\n"
             md += f"- **Reward Signals**: {rl_summary.get('reward_signals', 0)}\n\n"
+            if rl_summary.get('patterns'):
+                md += "### Improvement Taxonomy (Micro-Patterns)\n"
+                md += "| Issue | Severity | Frequency | Description |\n"
+                md += "|-------|----------|-----------|-------------|\n"
+                for p in rl_summary['patterns']:
+                    # if ImprovementPattern dataclass, get attributes
+                    issue = getattr(p, 'issue', p.get('issue', '')) if not isinstance(p, dict) else p.get('issue', '')
+                    sev = getattr(p, 'severity', p.get('severity', '')) if not isinstance(p, dict) else p.get('severity', '')
+                    freq = getattr(p, 'frequency', p.get('frequency', '')) if not isinstance(p, dict) else p.get('frequency', '')
+                    desc = getattr(p, 'description', p.get('description', '')) if not isinstance(p, dict) else p.get('description', '')
+                    md += f"| {issue} | {sev} | {freq} | {desc} |\n"
+                md += "\n"
 
         # Regression
         if reg_data:
@@ -241,10 +246,10 @@ class ReportBuilder:
                 md += f"- Difference: {reg_data['diff']:+.2f}\n"
             
         # Appendix: Failed Cases Only
-        failed_results = [e for e in eval_results if e.overall_score < 0.8]
+        failed_results = [e for e in eval_results if not e.passes()]
         if failed_results:
             md += "\n## Appendix: Failed Test Cases Detail\n"
-            md += "*(Showing only test cases with Overall Score < 0.8)*\n\n"
+            md += "*(Showing only test cases that failed the pass threshold or hit a dimension floor)*\n\n"
             
             tc_dict = {tc.id: tc for tc in test_cases}
             diag_dict = {d.tc_id: d for d in tc_diagnoses} if tc_diagnoses else {}
@@ -267,19 +272,12 @@ class ReportBuilder:
                             md += f"- {act}\n"
                         md += "\n"
                 else:
-                    if res.coverage.recall_score < 0.8:
-                        md += f"**Coverage Issue (Score: {res.coverage.recall_score:.2f})**\n"
-                        md += f"- Missing: {', '.join(res.coverage.must_mention_misses)}\n"
-                        
-                    if res.ranking.ndcg_at_5 < 0.8:
-                        md += f"**Ranking Issue (Score: {res.ranking.ndcg_at_5:.2f})**\n"
-                        md += f"- Suggestions: {', '.join(res.ranking.improvement_suggestions)}\n"
-                        
-                    scrape_issues = [i for sq in res.scrape_quality.values() for i in sq.issues_found]
-                    if scrape_issues:
-                        md += f"**Scrape Issues**\n"
-                        for i in scrape_issues[:3]: # show top 3
-                            md += f"- [{i.severity}] {i.type}: {i.detail}\n"
+                    for de in getattr(res, 'dimension_evals', []):
+                        if de.score < 0.8:
+                            md += f"**{de.dimension_name} Issue (Score: {de.score:.2f}, Level: {de.assigned_level})**\n"
+                            md += f"- Reasoning: {de.reasoning}\n"
+                            if de.contrastive_fail_triggered:
+                                md += f"- Contrastive Fail: {de.contrastive_fail_explanation}\n"
                 md += "\n---\n"
                 
         out_dir = os.path.join(APP_DIR, "outputs", "runs", run_id)
@@ -291,7 +289,7 @@ class ReportBuilder:
         return path
 
     def build_tc_report(self, tc: TestCase, eval_result: EvalResult, search_results: List[Any], diag: Any, pass_threshold: float) -> str:
-        passed = eval_result.overall_score >= pass_threshold
+        passed = eval_result.passes(pass_threshold, 0.40)
         badge = "🟢 PASSED" if passed else "🔴 FAILED"
         
         md = f"# Test Case Report: {tc.id} ({badge})\n\n"
@@ -301,6 +299,8 @@ class ReportBuilder:
         md += f"- **Intent**: {tc.intent}\n"
         md += f"- **Difficulty**: {tc.difficulty}\n"
         md += f"- **Overall Score**: {eval_result.overall_score:.3f}\n"
+        if getattr(eval_result, "floor_failures", []):
+            md += f"- **Floor Failures**: {', '.join(eval_result.floor_failures)} (Score < 0.40)\n"
         
         # Cache Status
         md += f"\n## Cache Behavior\n"
@@ -316,55 +316,61 @@ class ReportBuilder:
             
         # Judge Results
         md += f"\n## Judge Evaluation Details\n"
-        
-        # Coverage
-        cov = eval_result.coverage
-        md += f"### 1. Coverage (Score: {cov.recall_score:.2f})\n"
-        md += f"- **Must Mention Found**: {', '.join(cov.must_mention_hits) if cov.must_mention_hits else 'None'}\n"
-        md += f"- **Must Mention Missed**: {', '.join(cov.must_mention_misses) if cov.must_mention_misses else 'None'}\n"
-        md += f"- **Judge Reasoning**: {cov.reasoning}\n\n"
-        
-        # Ranking
-        rnk = eval_result.ranking
-        md += f"### 2. Ranking (Score: {rnk.ndcg_at_5:.2f})\n"
-        md += f"- **Firecrawl Ranking**: {rnk.firecrawl_ranking}\n"
-        md += f"- **LLM Ideal Ranking**: {rnk.llm_ideal_ranking}\n"
-        md += f"- **Judge Reasoning**: {rnk.ranking_reasoning}\n"
-        if rnk.improvement_suggestions:
-            md += f"- **Ranking Suggestions**:\n"
-            for sug in rnk.improvement_suggestions:
-                md += f"  - {sug}\n"
-        md += "\n"
-        
-        # Scrape Quality
-        md += f"### 3. Scrape Quality Per Result\n"
-        if eval_result.scrape_quality:
-            md += "| URL | Noise Score | Structure Score | Completeness | Overall Quality | Issues Found |\n"
-            md += "|-----|-------------|-----------------|--------------|-----------------|--------------|\n"
-            for url, sq in eval_result.scrape_quality.items():
-                issues = ", ".join([f"{i.type} ({i.severity})" for i in sq.issues_found]) if sq.issues_found else "None"
-                md += f"| {url} | {sq.noise_score:.2f} | {sq.structure_score:.2f} | {sq.completeness_score:.2f} | **{sq.overall_markdown_quality:.2f}** | {issues} |\n"
-        else:
-            md += "No scrape quality metrics available.\n"
+        for i, de in enumerate(getattr(eval_result, 'dimension_evals', []), 1):
+            status = "✅" if de.score >= pass_threshold else ("⚠️" if de.score >= 0.40 else "❌")
+            md += f"### {i}. {de.dimension_name} (Score: {de.score:.2f}, Level: {de.assigned_level}) {status}\n"
+            md += f"- **Weight**: {de.weight:.2f}\n"
+            md += f"- **Reasoning**: {de.reasoning}\n"
+            md += f"- **Level Justification**: {de.level_justification}\n"
+            md += f"- **Contrastive Fail Triggered**: {'YES ⚠️' if de.contrastive_fail_triggered else 'No'}\n"
+            if de.contrastive_fail_triggered:
+                md += f"- **Failure Explanation**: {de.contrastive_fail_explanation}\n"
+            md += "\n"
+
+        if getattr(eval_result, 'document_profiles', None):
+            md += f"### Document Profiles Evaluated\n"
+            md += "| Rank | URL | Domain Type | Words | Headings | Tables | Completeness |\n"
+            md += "|------|-----|-------------|-------|----------|--------|--------------|\n"
+            for p in eval_result.document_profiles:
+                st = p.get('structure', {})
+                co = p.get('content', {})
+                md += f"| {p.get('rank', '-')} | {p.get('url', 'N/A')} | {st.get('domain_type', 'N/A')} | {st.get('size', {}).get('total_words', 0)} | {st.get('structure', {}).get('heading_count', 0)} | {st.get('structure', {}).get('table_count', 0)} | {co.get('content_completeness', 'unknown')} |\n"
+            md += "\n"
             
         # Failure Diagnosis Section
         if not passed:
             md += f"\n## Failure Diagnosis & Recovery Roadmap\n"
             if diag:
-                dims = ", ".join(diag.failure_dimensions) if diag.failure_dimensions else "none"
+                dims = ", ".join(getattr(diag, "failure_dimensions", []))
+                if getattr(diag, "floor_failures", []):
+                    dims += f" (Critical: {', '.join(diag.floor_failures)})"
                 md += f"- **Failure Dimensions**: `{dims}`\n"
-                md += f"- **Root Cause**: {diag.root_cause_summary}\n\n"
+                md += f"- **Root Cause**: {getattr(diag, 'root_cause_summary', 'N/A')}\n\n"
                 md += f"### Diagnostic Breakdown\n"
-                md += f"- **Coverage Diagnosis**: {diag.coverage_diagnosis}\n"
-                md += f"- **Ranking Diagnosis**: {diag.ranking_diagnosis}\n"
-                md += f"- **Scrape Diagnosis**: {diag.scrape_diagnosis}\n\n"
-                if diag.improvement_actions:
+                md += f"- **Coverage Diagnosis**: {getattr(diag, 'coverage_diagnosis', 'N/A')}\n"
+                md += f"- **Ranking Diagnosis**: {getattr(diag, 'ranking_diagnosis', 'N/A')}\n"
+                md += f"- **Scrape Diagnosis**: {getattr(diag, 'scrape_diagnosis', 'N/A')}\n\n"
+                if getattr(diag, 'improvement_actions', []):
                     md += f"### Recommended Fix Actions\n"
                     for act in diag.improvement_actions:
                         md += f"- {act}\n"
             else:
                 md += "No detailed automated diagnosis was generated for this failure.\n"
-                
+        else:
+            if diag and (getattr(diag, 'improvement_actions', []) or getattr(diag, 'micro_pattern', None)):
+                md += f"\n## Optimization Opportunities\n"
+                md += f"*(This test case passed, but the diagnostic LLM found areas for proactive improvement)*\n\n"
+                md += f"- **Observations**: {getattr(diag, 'root_cause_summary', 'N/A')}\n\n"
+                if getattr(diag, 'improvement_actions', []):
+                    md += f"### Suggested Enhancements\n"
+                    for act in diag.improvement_actions:
+                        md += f"- {act}\n"
+                if getattr(diag, 'micro_pattern', None):
+                    mp = diag.micro_pattern
+                    md += f"\n### Identified Micro-Pattern\n"
+                    md += f"- **Type**: `{mp.get('pattern_type', 'unknown')}`\n"
+                    md += f"- **Description**: {mp.get('description', '')}\n"
+                    
         return md
 
     def build_tc_reports(self, run_id: str, test_cases: List[TestCase], eval_results: List[EvalResult], search_results_dict: dict, tc_diagnoses: List[Any], pass_threshold: float) -> List[str]:

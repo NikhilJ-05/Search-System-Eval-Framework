@@ -51,16 +51,20 @@ class QdrantStore:
                     )
                 }
             )
+        else:
+            logger.info(f"Qdrant collection {self.config.qdrant_collection} verified and ready.")
             
-            indexes = ["url", "query_origin", "content_hash"]
-            for field in indexes:
+        # Always ensure payload indexes exist on main collection
+        indexes = ["url", "query_origin", "content_hash", "doc_content_hash", "chunk_index"]
+        for field in indexes:
+            try:
                 await self.client.create_payload_index(
                     collection_name=self.config.qdrant_collection,
                     field_name=field,
-                    field_schema=PayloadSchemaType.KEYWORD,
+                    field_schema=PayloadSchemaType.INTEGER if field == "chunk_index" else PayloadSchemaType.KEYWORD,
                 )
-        else:
-            logger.info(f"Qdrant collection {self.config.qdrant_collection} verified and ready.")
+            except Exception as e:
+                logger.debug(f"Payload index already exists or failed for {field}: {e}")
 
     async def init_query_cache_collection(self):
         if not self.config.qdrant_url:
@@ -90,13 +94,19 @@ class QdrantStore:
                     )
                 }
             )
-            await self.client.create_payload_index(
-                collection_name=cache_coll,
-                field_name="query",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
         else:
             logger.info(f"Qdrant collection {cache_coll} verified and ready.")
+
+        # Always ensure payload indexes exist on query cache
+        for field, schema in [("query", PayloadSchemaType.KEYWORD), ("timestamp", PayloadSchemaType.FLOAT)]:
+            try:
+                await self.client.create_payload_index(
+                    collection_name=cache_coll,
+                    field_name=field,
+                    field_schema=schema,
+                )
+            except Exception as e:
+                logger.debug(f"Payload index already exists or failed for cache {field}: {e}")
 
     async def get_collection_stats(self) -> dict:
         if not self.config.qdrant_url:

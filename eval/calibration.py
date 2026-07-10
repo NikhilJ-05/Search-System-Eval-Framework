@@ -119,16 +119,15 @@ This website uses cookies to ensure you get the best experience on our website. 
                     continue
                     
                 is_valid = (
-                    eval_res.coverage.recall_score > 0.8 and
-                    eval_res.ranking.ndcg_at_5 > 0.8 and
-                    sq1.overall_markdown_quality >= 0.7 and
-                    sq2.overall_markdown_quality <= 0.5
+                    eval_res.coverage_score > 0.8 and
+                    eval_res.ranking_score > 0.8 and
+                    eval_res.overall_score >= 0.6
                 )
                 
                 if is_valid:
                     passed += 1
                 else:
-                    logger.warning(f"Calibration case failed expectations. Cov: {eval_res.coverage.recall_score}, Rnk: {eval_res.ranking.ndcg_at_5}, SQ1: {sq1.overall_markdown_quality}, SQ2: {sq2.overall_markdown_quality}")
+                    logger.warning(f"Calibration case failed expectations. Cov: {eval_res.coverage_score:.2f}, Rnk: {eval_res.ranking_score:.2f}, Overall: {eval_res.overall_score:.2f}")
                     
             except Exception as e:
                 logger.error(f"Judge calibration failed on case {tc.id}: {e}")

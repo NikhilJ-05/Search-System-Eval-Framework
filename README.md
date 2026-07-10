@@ -213,7 +213,6 @@ The `drain_events()` coroutine inside `run.py` maps internal event types to huma
 | `judge_model` | `JUDGE_MODEL` | `deepseek/deepseek-v4-flash` | LLM-B model slug |
 | `improvement_agent_model` | `IMPROVEMENT_AGENT_MODEL` | `deepseek/deepseek-v4-pro` | LLM-C model slug |
 | `num_test_cases` | `NUM_TEST_CASES` | `30` | Total TCs per run |
-| `batch_size` | `BATCH_SIZE` | `1` | TCs generated and executed per round |
 | `search_results_per_query` | — | `5` | Firecrawl search result limit |
 | `scrape_top_n` | — | `5` | Top N results to attempt scraping |
 | `pass_threshold` | `PASS_THRESHOLD` | `0.7` | Minimum overall score to "pass" |
@@ -465,7 +464,6 @@ The `Orchestrator` is the central coordinator. It owns all client/agent instance
 max_concurrent = min(
     len(fc_pool._clients),      # rate-limited by Firecrawl key count
     len(or_pool._clients),      # rate-limited by OpenRouter key count
-    batch_size,
     config.max_concurrent_tcs
 )
 semaphore = asyncio.Semaphore(max_concurrent)
@@ -897,7 +895,6 @@ QDRANT_COLLECTION_NAME=firecrawl_eval
 
 # ─── Run Settings ──────────────────────────────────────────────────────────
 NUM_TEST_CASES=30
-BATCH_SIZE=1
 MAX_CONCURRENT_TCS=10
 PASS_THRESHOLD=0.7
 

@@ -157,21 +157,45 @@ class OpenRouterClientPool:
             keys = ["dummy"]
         logger.info(f"[OpenRouterPool] Initialized with {len(keys)} key(s).")
         self._clients = [OpenRouterClient(k) for k in keys]
-        self._cycle = itertools.cycle(range(len(self._clients)))
+        self._in_flight: Dict[int, int] = {i: 0 for i in range(len(self._clients))}
         self._cooldowns: Dict[int, float] = {}
-        self._lock = asyncio.Lock()  # protect _cycle + _cooldowns under concurrency
+        self._lock = asyncio.Lock()  # protect _in_flight + _cooldowns under concurrency
 
     def _next_available_slot(self) -> Tuple[int, "OpenRouterClient", float]:
         # NOTE: must be called while holding self._lock
         now = time.time()
-        for _ in range(len(self._clients)):
-            idx = next(self._cycle)
-            if now >= self._cooldowns.get(idx, 0):
-                return idx, self._clients[idx], 0.0
-        
-        best_idx = min(self._cooldowns.keys(), key=lambda k: self._cooldowns[k])
-        sleep_time = max(0.0, self._cooldowns[best_idx] - now)
-        return best_idx, self._clients[best_idx], sleep_time
+        best_idx = -1
+        best_inflight = float('inf')
+        best_sleep = 0.0
+
+        # Try to find a slot not on cooldown with the minimum in-flight calls
+        for idx in range(len(self._clients)):
+            sleep_time = max(0.0, self._cooldowns.get(idx, 0.0) - now)
+            if sleep_time == 0.0:
+                inflight = self._in_flight.get(idx, 0)
+                if inflight < best_inflight:
+                    best_idx = idx
+                    best_inflight = inflight
+                    best_sleep = 0.0
+
+        if best_idx == -1:
+            # All slots are on cooldown. Pick the one that expires soonest.
+            min_cooldown = float('inf')
+            for idx in range(len(self._clients)):
+                cooldown_val = self._cooldowns.get(idx, 0.0)
+                if cooldown_val < min_cooldown:
+                    min_cooldown = cooldown_val
+                    best_idx = idx
+                    best_sleep = max(0.0, cooldown_val - now)
+                elif cooldown_val == min_cooldown:
+                    # Tie-breaker: choose the one with fewer in-flight calls
+                    if self._in_flight.get(idx, 0) < self._in_flight.get(best_idx, 0):
+                        best_idx = idx
+                        best_sleep = max(0.0, cooldown_val - now)
+
+        # Increment in-flight calls for the chosen slot
+        self._in_flight[best_idx] = self._in_flight.get(best_idx, 0) + 1
+        return best_idx, self._clients[best_idx], best_sleep
 
     async def generate(
         self,
@@ -206,16 +230,21 @@ class OpenRouterClientPool:
                 logger.info(f"[OpenRouterPool] ✓ generate() succeeded on attempt {attempt+1}")
                 return result
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429:
+                # Cooldown on rate limits and temporary server/gateway overloads
+                if e.response.status_code in (429, 503, 529):
                     cooldown = 10 + (attempt * 2)
                     async with self._lock:
                         self._cooldowns[idx] = time.time() + cooldown
                     logger.warning(
-                        f"[OpenRouterPool] 429 on slot {idx}. Cooling down for {cooldown}s."
+                        f"[OpenRouterPool] HTTP {e.response.status_code} on slot {idx}. Cooling down for {cooldown}s."
                     )
                     continue
                 raise
-        raise RuntimeError("All slots exhausted due to 429s.")
+            finally:
+                async with self._lock:
+                    self._in_flight[idx] = max(0, self._in_flight.get(idx, 1) - 1)
+        raise RuntimeError("All slots exhausted due to 429s/503s.")
+
 
     async def aclose(self):
         await asyncio.gather(*[c.aclose() for c in self._clients])

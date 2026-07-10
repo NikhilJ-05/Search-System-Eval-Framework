@@ -20,19 +20,40 @@ class FirecrawlClientPool:
             keys = ["dummy"]
         logger.info(f"[FirecrawlPool] Initialized with {len(keys)} API key(s).")
         self._clients = [Firecrawl(api_key=k) for k in keys]
-        self._cycle = itertools.cycle(range(len(self._clients)))
+        self._in_flight: Dict[int, int] = {i: 0 for i in range(len(self._clients))}
         self._cooldowns: Dict[int, float] = {}
-        self._lock = asyncio.Lock()  # protect _cycle + _cooldowns under concurrency
+        self._lock = asyncio.Lock()  # protect _in_flight + _cooldowns under concurrency
 
     def _next_available_slot(self) -> Tuple[int, Firecrawl, float]:
         now = time.time()
-        for _ in range(len(self._clients)):
-            idx = next(self._cycle)
-            if now >= self._cooldowns.get(idx, 0):
-                return idx, self._clients[idx], 0.0
-        best_idx = min(self._cooldowns.keys(), key=lambda k: self._cooldowns[k])
-        sleep_time = max(0.0, self._cooldowns[best_idx] - now)
-        return best_idx, self._clients[best_idx], sleep_time
+        best_idx = -1
+        best_inflight = float('inf')
+        best_sleep = 0.0
+
+        for idx in range(len(self._clients)):
+            sleep_time = max(0.0, self._cooldowns.get(idx, 0) - now)
+            if sleep_time == 0.0:
+                inflight = self._in_flight.get(idx, 0)
+                if inflight < best_inflight:
+                    best_idx = idx
+                    best_inflight = inflight
+                    best_sleep = 0.0
+
+        if best_idx == -1:
+            min_cooldown = float('inf')
+            for idx in range(len(self._clients)):
+                cooldown_val = self._cooldowns.get(idx, 0.0)
+                if cooldown_val < min_cooldown:
+                    min_cooldown = cooldown_val
+                    best_idx = idx
+                    best_sleep = max(0.0, cooldown_val - now)
+                elif cooldown_val == min_cooldown:
+                    if self._in_flight.get(idx, 0) < self._in_flight.get(best_idx, 0):
+                        best_idx = idx
+                        best_sleep = max(0.0, cooldown_val - now)
+
+        self._in_flight[best_idx] = self._in_flight.get(best_idx, 0) + 1
+        return best_idx, self._clients[best_idx], best_sleep
 
     async def _execute_with_retry(self, func, *args, **kwargs):
         max_attempts = len(self._clients) * 3 + 1
@@ -67,6 +88,9 @@ class FirecrawlClientPool:
                     logger.warning(f"[FirecrawlPool] Rate limited. Cooling slot {idx} for {cooldown}s.")
                     continue
                 raise
+            finally:
+                async with self._lock:
+                    self._in_flight[idx] = max(0, self._in_flight.get(idx, 1) - 1)
         raise RuntimeError("All slots exhausted due to rate limits.")
 
     async def search(self, query: str, limit: int = 5) -> Tuple[List[FirecrawlSearchResult], float]:
@@ -75,13 +99,7 @@ class FirecrawlClientPool:
 
         def do_search(client, q):
             logger.debug(f"[FirecrawlPool][thread] Calling client.search({repr(q[:60])}, limit={limit})")
-            try:
-                result = client.search(q, limit=limit)
-                logger.debug(f"[FirecrawlPool][thread] client.search returned: type={type(result).__name__}")
-                return result
-            except Exception as e:
-                logger.error(f"[FirecrawlPool][thread] client.search raised: {type(e).__name__}: {e}")
-                return {"data": []}
+            return client.search(q, limit=limit)
 
         result = await self._execute_with_retry(do_search, query)
         duration = (time.time() - t0) * 1000
@@ -153,9 +171,7 @@ class FirecrawlClientPool:
         def do_scrape(client, u):
             logger.debug(f"[FirecrawlPool][thread] Calling client.scrape({u})")
             try:
-                result = client.scrape(u, formats=['markdown'])
-                logger.debug(f"[FirecrawlPool][thread] client.scrape returned type={type(result).__name__}")
-                return result
+                return client.scrape(u, formats=['markdown'])
             except (AttributeError, TypeError) as e:
                 logger.debug(f"[FirecrawlPool][thread] client.scrape failed ({e}), falling back to scrape_url")
                 return client.scrape_url(u, params={'formats': ['markdown']})

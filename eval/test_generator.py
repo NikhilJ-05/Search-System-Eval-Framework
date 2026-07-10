@@ -4,449 +4,472 @@ import re
 import uuid
 import asyncio
 import random
+import copy
 from datetime import datetime
-from typing import List, Optional, Tuple
-from models.test_case import TestCase, VALID_INTENTS
+from typing import List, Optional, Tuple, Dict, Any
+from models.test_case import TestCase, VALID_INTENTS, AGENT_CHAOS_ARCHETYPES, RubricDimension, EvalRubric
+from eval.test_case_history import TestCaseHistory
 from clients.openrouter import OpenRouterClientPool
 from config import EvalConfig
 
 logger = logging.getLogger(__name__)
 
-DOMAIN_BUCKETS = [
-    {"name": "Healthcare & Medical",      "family": "health",    "structural_categories": ["structured_data_extraction", "pdf_document", "long_form_article"],       "example_queries": ["FDA drug approval list with dosage table", "WHO ICD-11 disease classification codes"]},
-    {"name": "Finance & Investing",       "family": "finance",   "structural_categories": ["structured_data_extraction", "rapidly_changing", "paywalled_content"],  "example_queries": ["Roth IRA contribution limits 2026", "S&P 500 sector weights breakdown table"]},
-    {"name": "Legal & Regulatory",        "family": "legal",     "structural_categories": ["pdf_document", "nav_heavy_portal", "structured_data_extraction"],      "example_queries": ["GDPR Article 17 right to erasure requirements", "US visa types and eligibility table"]},
-    {"name": "Travel & Geography",        "family": "travel",    "structural_categories": ["structured_data_extraction", "dynamic_spa_content", "nav_heavy_portal"], "example_queries": ["visa free travel countries for Indian passport", "JFK airport terminal map gates"]},
-    {"name": "Science & Academia",        "family": "science",   "structural_categories": ["long_form_article", "pdf_document", "structured_data_extraction"],       "example_queries": ["periodic table element properties with electronegativity", "James Webb telescope infrared discoveries 2026"]},
-    {"name": "Food & Nutrition",          "family": "food",      "structural_categories": ["structured_data_extraction", "long_form_article", "minimal_content"],      "example_queries": ["USDA protein content per 100g food table", "sourdough bread fermentation time temperature chart"]},
-    {"name": "Sports & Entertainment",    "family": "sports",    "structural_categories": ["rapidly_changing", "dynamic_spa_content", "structured_data_extraction"],  "example_queries": ["Formula 1 2026 driver standings table", "NBA all-time scoring leaders list"]},
-    {"name": "Education & Academia",      "family": "education", "structural_categories": ["structured_data_extraction", "nav_heavy_portal", "pdf_document"],         "example_queries": ["SAT score percentiles 2026 table", "Harvard admission statistics by major"]},
-    {"name": "E-Commerce & Products",     "family": "commerce",  "structural_categories": ["structured_data_extraction", "nav_heavy_portal", "dynamic_spa_content"],  "example_queries": ["iPhone 16 Pro vs Samsung S25 specs comparison", "mattress firmness comparison chart brands"]},
-    {"name": "Government & Public Policy","family": "government","structural_categories": ["pdf_document", "nav_heavy_portal", "long_form_article"],               "example_queries": ["US federal minimum wage history table", "Medicare Part D drug coverage tiers 2026"]},
-    {"name": "Environment & Climate",     "family": "science",   "structural_categories": ["structured_data_extraction", "long_form_article", "rapidly_changing"],    "example_queries": ["CO2 emissions by country ranking table", "current AQI levels major US cities"]},
-    {"name": "History & Humanities",      "family": "humanities","structural_categories": ["long_form_article", "pdf_document", "nav_heavy_portal"],               "example_queries": ["causes of World War 1 timeline key events", "Roman Empire decline fall major reasons list"]},
-    # Technology capped to ≤1 per batch via family="tech" uniqueness constraint
-    {"name": "Technology & Software",     "family": "tech",      "structural_categories": ["code_documentation", "structured_data_extraction", "multi_language"],     "example_queries": ["pandas dataframe merge vs join syntax", "SQLAlchemy async session configuration", "Python asyncio gather vs wait difference with code example", "implement binary search tree insertion deletion Python", "Node.js 20 vs Deno 2 HTTP server benchmark", "gradient descent convergence conditions learning rate"]},
+DOMAINS = [
+    "Healthcare & Medical",
+    "Finance & Investing",
+    "Legal & Regulatory",
+    "Travel & Geography",
+    "Science & Academia",
+    "Food & Nutrition",
+    "Sports & Entertainment",
+    "Education & Academia",
+    "E-Commerce & Products",
+    "Government & Public Policy",
+    "Environment & Climate",
+    "History & Humanities",
+    "Technology & Software",
+    "Cybersecurity",
+    "Pharmaceuticals & Drug Information",
+    "Real Estate & Property",
 ]
 
-def _robust_parse_json_list(raw: str) -> list:
-    text = raw.strip()
+AGENT_CHAOS_DESCRIPTIONS = {
+    "none": {
+        "description": "A well-structured, clear, and direct query reflecting standard search intent.",
+        "failure_mode": "Baseline behavior, standard search response expected."
+    },
+    "over_decomposed": {
+        "description": "An agent broke a complex query into too simple or narrow search steps, losing the overall goal.",
+        "failure_mode": "Loses essential comparative context or surrounding constraints, returning generic, single-topic results."
+    },
+    "keyword_stuffed": {
+        "description": "The agent dumped all context tags, synonyms, and criteria directly into the query instead of phrasing it naturally.",
+        "failure_mode": "Search engine matches irrelevant terms, diluting target relevance and bringing noisy aggregator blogs."
+    },
+    "reformulation_drift": {
+        "description": "After a previous search returned sub-optimal results, the agent reformulates a query that drifts from the user's original objective.",
+        "failure_mode": "Successive search runs yield increasingly unrelated or tangential information."
+    },
+    "multi_hop_compressed": {
+        "description": "A query that attempts to resolve a multi-hop reasoning chain in a single search, expecting the search engine to perform synthesis.",
+        "failure_mode": "Zero or highly generic search results because no single page contains all layers of the reasoning path."
+    },
+    "temporal_ambiguity": {
+        "description": "The query uses relative words like 'latest', 'current', or 'recent' without specific years or dates.",
+        "failure_mode": "Search results show outdated pages that use marketing language like 'latest updates' from prior years."
+    },
+    "copy_paste_artifact": {
+        "description": "The query contains leftovers from prompt templates, JSON structural parameters, or tool call syntax.",
+        "failure_mode": "Bizarre keyword matches on technical artifacts (e.g. key names, quotes, parameter brackets) in documents."
+    }
+}
 
-    m = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+def _robust_parse_json(raw: str) -> dict:
+    text = raw.strip()
+    # Strip thinking blocks if model outputs them
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    
+    m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if m:
         text = m.group(1).strip()
-
+        
     try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for val in data.values():
-                if isinstance(val, list):
-                    return val
+        return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    arr_start = text.find('[')
-    if arr_start != -1:
-        arr_end = text.rfind(']')
-        if arr_end > arr_start:
-            try:
-                return json.loads(text[arr_start:arr_end + 1])
-            except json.JSONDecodeError:
-                pass
-
-    objects = []
-    decoder = json.JSONDecoder()
-    pos = 0
-    while pos < len(text):
-        while pos < len(text) and text[pos] in ' \t\r\n,':
-            pos += 1
-        if pos >= len(text):
-            break
-        if text[pos] != '{':
-            pos += 1
-            continue
+        
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end > start:
         try:
-            obj, end_idx = decoder.raw_decode(text, pos)
-            objects.append(obj)
-            pos = end_idx
+            return json.loads(text[start:end+1])
         except json.JSONDecodeError:
-            pos += 1
-
-    if objects:
-        logger.info(f"[TestGenerator] NDJSON fallback: collected {len(objects)} objects")
-        return objects
-
-    raise ValueError(f"Could not extract a JSON list from LLM response. First 200 chars: {raw[:200]}")
-
+            pass
+            
+    raise ValueError(f"Could not extract a valid JSON object. Response snippet: {raw[:200]}")
 
 class TestGenerator:
     def __init__(self, config: EvalConfig, or_pool: OpenRouterClientPool):
         self.config = config
         self.or_pool = or_pool
         self.model = config.generator_model
+        self._semaphore = asyncio.Semaphore(8)
 
     def _validate_test_case(self, tc_data: dict) -> Tuple[bool, List[str]]:
         warnings = []
         if len(tc_data.get("query", "").split()) < 4:
             return False, ["Query too short (< 4 words)"]
-        if len(tc_data.get("expected_coverage", {}).get("must_mention", [])) < 2:
-            return False, ["must_mention has < 2 items"]
-        if not tc_data.get("expected_scrape_challenges", {}).get("expected_elements"):
-            return False, ["expected_elements is empty"]
         
         if tc_data.get("intent") not in VALID_INTENTS:
             warnings.append(f"Unknown intent '{tc_data.get('intent')}', defaulting to 'exploratory'")
             tc_data["intent"] = "exploratory"
             
-        if tc_data.get("difficulty") == "medium":
-            warnings.append("Difficulty is 'medium' — LLM may be defaulting")
-        if not tc_data.get("expected_ranking", {}).get("expected_source_priority"):
-            warnings.append("No expected_source_priority — ranking judge will have less signal")
-            tc_data.setdefault("expected_ranking", {})["expected_source_priority"] = []
+        rubric = tc_data.get("rubric", {})
+        if not rubric:
+            return False, ["Missing 'rubric' object"]
+            
+        dimensions = rubric.get("dimensions", [])
+        if not isinstance(dimensions, list) or len(dimensions) < 2:
+            return False, ["Rubric must contain at least 2 dimensions"]
+            
+        for idx, d in enumerate(dimensions):
+            if not isinstance(d, dict):
+                return False, [f"Dimension index {idx} is not a valid dictionary"]
+            if not d.get("name"):
+                return False, [f"Dimension index {idx} missing 'name'"]
+            if not d.get("criteria"):
+                return False, [f"Dimension index {idx} missing 'criteria'"]
+            if not d.get("contrastive_fail"):
+                return False, [f"Dimension index {idx} missing 'contrastive_fail'"]
+            try:
+                d["weight"] = float(d.get("weight", 0.0))
+            except (ValueError, TypeError):
+                return False, [f"Dimension index {idx} has invalid weight value"]
+                
+        total_weight = sum(float(d.get("weight", 0.0)) for d in dimensions)
+        if abs(total_weight - 1.0) > 0.15:
+            return False, [f"Rubric dimension weights must sum to approximately 1.0 (got {total_weight})"]
             
         return True, warnings
 
-    async def _generate_novel_anchors(self, domains: List[dict], previous_queries: List[str], previous_urls: List[str]) -> List[TestCase]:
+    async def generate_novel(self, num_cases: int, history: TestCaseHistory) -> List[TestCase]:
         today = datetime.now().strftime("%Y-%m-%d")
         current_year = datetime.now().strftime("%Y")
         
-        # Stratified history sample: always include the last 5 for recency, then
-        # randomly sample up to 10 more from the older history for diversity.
-        RECENT_N = 5
-        SAMPLE_N = 10
-        recent = previous_queries[-RECENT_N:] if previous_queries else []
-        older = previous_queries[:-RECENT_N] if len(previous_queries) > RECENT_N else []
-        sampled_older = random.sample(older, min(SAMPLE_N, len(older)))
-        avoid_queries = list(dict.fromkeys(recent + sampled_older))  # deduplicated, order preserved
-        avoid_queries_str = json.dumps(avoid_queries, indent=2) if avoid_queries else "None"
-        system_prompt_base = f"""You are a red-team engineer finding failure modes in a web scraping pipeline. 
-Design a query that exposes weaknesses in search coverage, ranking, and markdown extraction.
-IMPORTANT: Today is {today}. Use {current_year} for current events.
+        all_past_queries = history.all_queries()
+        avoid_queries_str = json.dumps(all_past_queries, indent=2) if all_past_queries else "None"
+        
+        system_prompt = f"""You are a Red-Team AI Evaluation Architect specializing in testing search and scraping pipelines for agentic workflows.
+Your role is to author a challenging Test Case representing an agent-generated search query, along with a multi-dimensional Evaluation Rubric for grading search & scrape results.
 
-AVOID DUPLICATES: Do NOT generate queries that are semantically similar to any of these already-used queries:
+Today is {today}. Use year {current_year} for temporal constraints/anchors.
+
+VALID INTENTS:
+{json.dumps(VALID_INTENTS, indent=2)}
+
+AGENT CHAOS ARCHETYPES:
+{json.dumps(AGENT_CHAOS_DESCRIPTIONS, indent=2)}
+
+AVOID DUPLICATE QUERIES:
+Do NOT generate queries semantically similar to any of these:
 {avoid_queries_str}
 
-AUTHENTICITY RULE: The query MUST sound like natural, authentic search terms typed into Google (e.g. "celiac disease gluten free diet food list"). No robotic boilerplate ("Comprehensive guide to...").
+RUBRIC SCHEMA INSTRUCTIONS:
+- You must define 2 to 4 Rubric Dimensions. The weights of the dimensions MUST sum up exactly to 1.0.
+- Each dimension must have:
+  1. `name`: unique identifier (e.g., "coverage", "source_authority", "structural_fidelity").
+  2. `weight`: numeric score weight.
+  3. `criteria`: explicit instructions on what the scraped/retrieved content must satisfy.
+  4. `contrastive_fail`: a concrete description/example of a failure mode for this dimension to calibrate the judge.
+- `grading_notes`: general guidance for the judge on how to evaluate the overall response, handle edge cases, or prioritize content.
 
-QUALITY RULES:
-1. `must_mention` MUST contain >=3 specific named entities.
-2. `expected_elements` MUST list >=2 concrete HTML structures to preserve (e.g. "data_tables", "code_blocks").
-3. `noise_risks` MUST cite specific website patterns (e.g. "cookie_consent_banner").
-4. `query` MUST be >=5 words.
-5. `intent` MUST be one of: factual_lookup, comparative_research, tutorial_howto, data_extraction, navigational, exploratory, real_time.
-6. `cache_intent` MUST be "novel".
-
-Output exactly ONE JSON object (NOT an array). Do not use markdown wrappers if possible."""
-
-        anchors = []
-        
-        async def fetch_anchor(domain: dict):
-            prompt = f"""
-Target Domain: {domain['name']}
-Allowed Categories: {', '.join(domain['structural_categories'])}
-Example queries in this domain: {', '.join(f'"{q}"' for q in domain['example_queries'])}
-
-Generate EXACTLY ONE novel test case object in this domain.
-You MUST follow this EXACT nested JSON schema — do NOT flatten fields to the top level:
-
+OUTPUT SCHEMA:
+Your entire response must be a single, valid JSON object matching the following structure:
 {{
-  "id": "tc_placeholder",
-  "query": "<5+ word natural search query>",
-  "intent": "<one of: factual_lookup|comparative_research|tutorial_howto|data_extraction|navigational|exploratory|real_time>",
-  "difficulty": "<easy|hard>",
-  "category": "<one of the Allowed Categories above>",
-  "cache_intent": "novel",
-  "expected_coverage": {{
-    "must_mention": ["<entity1>", "<entity2>", "<entity3>"],
-    "should_mention": ["<optional1>", "<optional2>"],
-    "min_relevant_results": 2
-  }},
-  "expected_ranking": {{
-    "ranking_signals": ["<signal1>", "<signal2>"],
-    "ideal_ranking_rationale": "<why source A beats source B>",
-    "expected_source_priority": ["<domain1.com>", "<domain2.com>"]
-  }},
-  "expected_scrape_challenges": {{
-    "likely_page_types": ["<page_type>"],
-    "expected_elements": ["<html_element1>", "<html_element2>"],
-    "noise_risks": ["<specific_site_pattern1>", "<specific_site_pattern2>"]
+  "query": "<5+ words query reflecting the chosen chaos archetype>",
+  "intent": "<one of VALID INTENTS>",
+  "difficulty": "<easy|medium|hard>",
+  "rubric": {{
+    "dimensions": [
+      {{
+        "name": "<dimension_name>",
+        "weight": <float between 0.1 and 0.8>,
+        "criteria": "<specific search/scrape criteria>",
+        "contrastive_fail": "<what failure looks like>"
+      }}
+    ],
+    "grading_notes": "<free text instructions>"
   }}
 }}
-
-ONE-SHOT EXAMPLE (for the Finance domain):
-{{
-  "id": "tc_placeholder",
-  "query": "Roth IRA maximum contribution limits 2026 income phase out thresholds",
-  "intent": "factual_lookup",
-  "difficulty": "easy",
-  "category": "structured_data_extraction",
-  "cache_intent": "novel",
-  "expected_coverage": {{
-    "must_mention": ["IRS", "Roth_IRA", "modified_adjusted_gross_income"],
-    "should_mention": ["catch_up_contribution", "traditional_IRA"],
-    "min_relevant_results": 2
-  }},
-  "expected_ranking": {{
-    "ranking_signals": ["official_source", "date_freshness"],
-    "ideal_ranking_rationale": "IRS.gov should rank first for authoritative dollar limits",
-    "expected_source_priority": ["irs.gov", "nerdwallet.com"]
-  }},
-  "expected_scrape_challenges": {{
-    "likely_page_types": ["government_portal", "financial_guide"],
-    "expected_elements": ["data_tables", "income_threshold_lists"],
-    "noise_risks": ["nerdwallet_sticky_nav", "cookie_consent_overlay"]
-  }}
-}}
-
-Output ONLY the JSON object for the {domain['name']} domain. No markdown fences, no commentary.
 """
+        
+        async def fetch_case(domain: str, archetype: str) -> Optional[TestCase]:
+            archetype_info = AGENT_CHAOS_DESCRIPTIONS[archetype]
+            prompt = f"""Target Domain: {domain}
+Chaos Archetype: {archetype}
+Archetype Description: {archetype_info['description']}
+Archetype Expected Failure Mode: {archetype_info['failure_mode']}
+
+Generate exactly ONE novel Test Case JSON object.
+Enforce the chosen chaos archetype characteristics into the query. It must read like an agent query suffering from this exact flaw.
+Ensure the rubric criteria is tailored to grade whether a search/scrape pipeline successfully overcomes this archetype's challenge.
+Output ONLY the JSON object. Do not include markdown wraps or commentary.
+"""
+            last_error: Optional[str] = None
             for attempt in range(3):
                 try:
+                    # On retry, inject an explicit correction message so the model
+                    # understands why the previous response was rejected.
+                    retry_prefix = ""
+                    if attempt > 0 and last_error:
+                        retry_prefix = (
+                            f"Your previous response was rejected for this reason: {last_error}\n"
+                            "Try again. Output ONLY a valid JSON object — no markdown, no commentary, starting with '{' and ending with '}'. \n\n"
+                        )
                     raw = await self.or_pool.generate(
-                        prompt=prompt,
+                        prompt=retry_prefix + prompt,
                         model=self.model,
                         temperature=0.8,
-                        system_prompt=system_prompt_base,
-                        max_tokens=16000,
+                        system_prompt=system_prompt,
+                        max_tokens=2500,
                         providers=self.config.generator_providers
                     )
                     
-                    text = raw.strip()
-                    m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-                    if m:
-                        text = m.group(1).strip()
-                    
-                    data = None
-                    try:
-                        data = json.loads(text)
-                    except json.JSONDecodeError:
-                        start = text.find('{')
-                        end = text.rfind('}')
-                        if start != -1 and end > start:
-                            data = json.loads(text[start:end+1])
-                            
+                    data = _robust_parse_json(raw)
                     if isinstance(data, dict):
                         is_valid, warnings = self._validate_test_case(data)
                         if is_valid:
-                            data['id'] = f"tc_{uuid.uuid4().hex[:8]}"
-                            data['cache_intent'] = "novel"
-                            if data.get('category') not in domain['structural_categories']:
-                                data['category'] = random.choice(domain['structural_categories'])
-                            return TestCase.from_dict(data)
+                            dimensions = data["rubric"]["dimensions"]
+                            total_w = sum(d["weight"] for d in dimensions)
+                            if abs(total_w - 1.0) > 0.001:
+                                for d in dimensions:
+                                    d["weight"] = round(d["weight"] / total_w, 2)
+                                diff = round(1.0 - sum(d["weight"] for d in dimensions[:-1]), 2)
+                                dimensions[-1]["weight"] = diff
+                            
+                            rubric_dims = [RubricDimension(**d) for d in dimensions]
+                            rubric = EvalRubric(
+                                dimensions=rubric_dims,
+                                grading_notes=data["rubric"].get("grading_notes", "")
+                            )
+                            return TestCase(
+                                id=f"tc_{uuid.uuid4().hex[:8]}",
+                                query=data["query"],
+                                domain=domain,
+                                intent=data["intent"],
+                                difficulty=data["difficulty"],
+                                chaos_archetype=archetype,
+                                cache_relationship="novel",
+                                category=domain,
+                                parent_case_id=None,
+                                rubric=rubric,
+                                cache_intent="novel"
+                            )
                         else:
-                            logger.warning(f"Invalid anchor generated: {warnings}")
+                            last_error = f"Validation failed: {'; '.join(warnings)}"
+                            logger.warning(f"Invalid generated test case: {warnings}. Response raw: {raw[:200]}")
+                except json.JSONDecodeError as e:
+                    last_error = f"Response was not valid JSON: {e}"
+                    logger.warning(f"JSON parse error on attempt {attempt+1}: {e}")
                 except Exception as e:
-                    logger.warning(f"Error generating anchor: {e}")
+                    last_error = str(e)
+                    logger.warning(f"Error generating test case on attempt {attempt+1}: {e}")
             return None
 
-        sem = asyncio.Semaphore(8)
-        async def bounded_fetch(domain):
-            async with sem:
-                return await fetch_anchor(domain)
+        async def bounded_fetch(domain: str, archetype: str) -> Optional[TestCase]:
+            async with self._semaphore:
+                return await fetch_case(domain, archetype)
 
-        tasks = [bounded_fetch(d) for d in domains]
+        archetypes = list(self.config.archetype_weights.keys())
+        weights = list(self.config.archetype_weights.values())
+
+        tasks = []
+        for _ in range(num_cases):
+            domain = random.choice(DOMAINS)
+            archetype = random.choices(archetypes, weights=weights, k=1)[0]
+            tasks.append(bounded_fetch(domain, archetype))
+
         results = await asyncio.gather(*tasks)
-        
-        for res in results:
-            if res:
-                anchors.append(res)
-                
-        return anchors
+        cases = [c for c in results if c is not None]
+        return cases
 
-    async def _generate_cache_variants(self, anchors: List[TestCase], previous_queries: List[str], previous_urls: List[str], num_variants: int) -> List[TestCase]:
-        if num_variants <= 0:
-            return []
+    async def _fetch_variant(self, parent: TestCase, relationship: str) -> Optional[TestCase]:
+        if relationship == "exact_duplicate":
+            rubric_copy = copy.deepcopy(parent.rubric)
+            return TestCase(
+                id=f"tc_{uuid.uuid4().hex[:8]}",
+                query=parent.query,
+                domain=parent.domain,
+                intent=parent.intent,
+                difficulty=parent.difficulty,
+                chaos_archetype=parent.chaos_archetype,
+                cache_relationship="exact_duplicate",
+                category=parent.domain,
+                parent_case_id=parent.id,
+                rubric=rubric_copy,
+                cache_intent="exact_duplicate"
+            )
             
-        today = datetime.now().strftime("%Y-%m-%d")
-        current_year = datetime.now().strftime("%Y")
+        parent_dict = {
+            "id": parent.id,
+            "query": parent.query,
+            "intent": parent.intent,
+            "domain": parent.domain,
+            "difficulty": parent.difficulty,
+            "rubric": {
+                "dimensions": [
+                    {
+                        "name": d.name,
+                        "weight": d.weight,
+                        "criteria": d.criteria,
+                        "contrastive_fail": d.contrastive_fail
+                    } for d in parent.rubric.dimensions
+                ] if parent.rubric else [],
+                "grading_notes": parent.rubric.grading_notes if parent.rubric else ""
+            }
+        }
         
-        ref_pool = []
-        for a in anchors:
-            ref_pool.append({"query": a.query, "category": a.category})
-        # Stratified reference pool: all current anchors + a representative sample
-        # of history (recent 5 always included, up to 10 more sampled from older rounds).
-        RECENT_N = 5
-        SAMPLE_N = 10
-        recent_hist = previous_queries[-RECENT_N:] if previous_queries else []
-        older_hist = previous_queries[:-RECENT_N] if len(previous_queries) > RECENT_N else []
-        sampled_hist = random.sample(older_hist, min(SAMPLE_N, len(older_hist)))
-        selected_hist = list(dict.fromkeys(recent_hist + sampled_hist))
+        system_prompt = f"""You are a Red-Team AI Evaluation Architect.
+Your task is to generate a cache-testing variant query derived from a parent TestCase.
 
-        for pq in selected_hist:
-            if pq not in [r["query"] for r in ref_pool]:
-                ref_pool.append({"query": pq, "category": "historical"})
-                
-        system_prompt = f"""You are a red-team engineer generating cache-testing queries.
-IMPORTANT: Today is {today}. Use {current_year}.
-AUTHENTICITY RULE: Queries MUST sound like natural, authentic search terms typed into a search engine.
+VALID INTENTS (intent field MUST be one of these exact strings):
+{json.dumps(VALID_INTENTS, indent=2)}
 
-We are testing a search cache. Given a REFERENCE POOL of recent queries, generate EXACTLY {num_variants} cache-variant test cases.
-Each generated test case MUST derive from one of the reference queries, using one of these `cache_intent` values:
-- `exact_duplicate`: EXACT same query string as a reference query.
-- `semantic_near_miss`: EXACT same semantic intent as a reference query, but different phrasing.
-- `shared_url`: A related query that would likely return the same authoritative URL/document.
-- `semantic_far_miss`: A query in the same general domain but distinctly different intent.
+TARGET CACHE RELATIONSHIPS:
+- same_source_different_angle: The variant query must seek a completely different set of information from the same target source material. The rubric MUST be completely rewritten to assess the new angle.
+- rephrased_same_intent: The variant query must be a natural, distinct rephrasing of the parent query, with the same core intent. The rubric should be similar but adapted if needed.
+- subset_of_parent: The variant query must target a subset or specific sub-detail of the parent query's scope. The rubric should be narrower.
 
-CRITICAL: You MUST use this EXACT nested JSON schema — do NOT flatten fields to the top level:
+RUBRIC REQUIREMENTS:
+- 2 to 4 dimensions, weights must sum to exactly 1.0.
+- Each dimension needs: name, weight (float), criteria (what success looks like), contrastive_fail (what failure looks like).
 
+OUTPUT SCHEMA:
+Your entire response must be a single, valid JSON object. Start with '{{' and end with '}}'. No markdown, no commentary.
 {{
-  "id": "tc_placeholder",
-  "query": "<5+ word natural search query>",
-  "intent": "<factual_lookup|comparative_research|tutorial_howto|data_extraction|navigational|exploratory|real_time>",
-  "difficulty": "<easy|hard>",
-  "category": "<structured_data_extraction|dynamic_spa_content|pdf_document|code_documentation|rapidly_changing|long_form_article|minimal_content|nav_heavy_portal|multi_language|paywalled_content>",
-  "cache_intent": "<exact_duplicate|semantic_near_miss|shared_url|semantic_far_miss>",
-  "derived_from_query": "<query string from reference pool this was derived from>",
-  "expected_coverage": {{
-    "must_mention": ["<entity1>", "<entity2>", "<entity3>"],
-    "should_mention": ["<optional1>"],
-    "min_relevant_results": 2
-  }},
-  "expected_ranking": {{
-    "ranking_signals": ["<signal1>"],
-    "ideal_ranking_rationale": "<reasoning>",
-    "expected_source_priority": ["<domain1.com>", "<domain2.com>"]
-  }},
-  "expected_scrape_challenges": {{
-    "likely_page_types": ["<page_type>"],
-    "expected_elements": ["<element1>", "<element2>"],
-    "noise_risks": ["<site_pattern1>", "<site_pattern2>"]
+  "query": "<variant query string>",
+  "intent": "<one of the VALID INTENTS above>",
+  "difficulty": "<easy|medium|hard>",
+  "rubric": {{
+    "dimensions": [
+      {{
+        "name": "<dimension_name>",
+        "weight": <float>,
+        "criteria": "<specific search/scrape criteria>",
+        "contrastive_fail": "<what failure looks like>"
+      }}
+    ],
+    "grading_notes": "<free text instructions>"
   }}
 }}
-
-ONE-SHOT EXAMPLE (semantic_near_miss of "Roth IRA contribution limits 2026"):
-{{
-  "id": "tc_placeholder",
-  "query": "how much can I put in a Roth IRA this year income limits",
-  "intent": "factual_lookup",
-  "difficulty": "easy",
-  "category": "structured_data_extraction",
-  "cache_intent": "semantic_near_miss",
-  "derived_from_query": "Roth IRA contribution limits 2026",
-  "expected_coverage": {{
-    "must_mention": ["IRS", "Roth_IRA", "modified_adjusted_gross_income"],
-    "should_mention": ["catch_up_contribution"],
-    "min_relevant_results": 2
-  }},
-  "expected_ranking": {{
-    "ranking_signals": ["official_source", "date_freshness"],
-    "ideal_ranking_rationale": "IRS.gov should rank first",
-    "expected_source_priority": ["irs.gov", "nerdwallet.com"]
-  }},
-  "expected_scrape_challenges": {{
-    "likely_page_types": ["government_portal", "financial_guide"],
-    "expected_elements": ["data_tables", "income_threshold_lists"],
-    "noise_risks": ["nerdwallet_sticky_nav", "cookie_consent_overlay"]
-  }}
-}}
-
-Output EXACTLY a JSON array [ ... ] containing {num_variants} objects. No markdown fences, no commentary."""
-
-        prompt = f"""
-REFERENCE POOL:
-{json.dumps(ref_pool, indent=2)}
-
-Generate {num_variants} cache-variant test cases derived from the reference pool. Output ONLY the JSON array.
 """
+        
+        prompt = f"""Parent Test Case:
+{json.dumps(parent_dict, indent=2)}
 
+Requested Cache Relationship: {relationship}
+
+Generate exactly ONE variant Test Case JSON object.
+Output ONLY the JSON object. Do not include markdown wraps or commentary.
+"""
+        last_error: Optional[str] = None
         for attempt in range(3):
             try:
+                retry_prefix = ""
+                if attempt > 0 and last_error:
+                    retry_prefix = (
+                        f"Your previous response was rejected for this reason: {last_error}\n"
+                        "Try again. Output ONLY a valid JSON object — no markdown, no commentary, starting with '{' and ending with '}'. \n\n"
+                    )
                 raw = await self.or_pool.generate(
-                    prompt=prompt,
+                    prompt=retry_prefix + prompt,
                     model=self.model,
                     temperature=0.7,
                     system_prompt=system_prompt,
-                    max_tokens=16000,
+                    max_tokens=2500,
                     providers=self.config.generator_providers
                 )
                 
-                data = _robust_parse_json_list(raw)
-                if not data:
-                    continue
-                    
-                variants = []
-                for item in data:
-                    if len(variants) >= num_variants:
-                        break
-                    is_valid, warnings = self._validate_test_case(item)
+                data = _robust_parse_json(raw)
+                if isinstance(data, dict):
+                    is_valid, warnings = self._validate_test_case(data)
                     if is_valid:
-                        item.pop("derived_from_query", None)
-                        item['id'] = f"tc_{uuid.uuid4().hex[:8]}"
-                        if item.get("cache_intent") not in ["exact_duplicate", "semantic_near_miss", "shared_url", "semantic_far_miss"]:
-                            item["cache_intent"] = "semantic_near_miss"
-                        variants.append(TestCase.from_dict(item))
-                
-                if len(variants) > 0:
-                    return variants
+                        dimensions = data["rubric"]["dimensions"]
+                        total_w = sum(d["weight"] for d in dimensions)
+                        if abs(total_w - 1.0) > 0.001:
+                            for d in dimensions:
+                                d["weight"] = round(d["weight"] / total_w, 2)
+                            diff = round(1.0 - sum(d["weight"] for d in dimensions[:-1]), 2)
+                            dimensions[-1]["weight"] = diff
+                        
+                        rubric_dims = [RubricDimension(**d) for d in dimensions]
+                        rubric = EvalRubric(
+                            dimensions=rubric_dims,
+                            grading_notes=data["rubric"].get("grading_notes", "")
+                        )
+                        return TestCase(
+                            id=f"tc_{uuid.uuid4().hex[:8]}",
+                            query=data["query"],
+                            domain=parent.domain,
+                            intent=data["intent"],
+                            difficulty=data["difficulty"],
+                            chaos_archetype=parent.chaos_archetype,
+                            cache_relationship=relationship,
+                            category=parent.domain,
+                            parent_case_id=parent.id,
+                            rubric=rubric,
+                            cache_intent=relationship
+                        )
+                    else:
+                        last_error = f"Validation failed: {'; '.join(warnings)}"
+                        logger.warning(f"Invalid cache variant test case: {warnings}. Raw: {raw[:200]}")
+            except json.JSONDecodeError as e:
+                last_error = f"Response was not valid JSON: {e}"
+                logger.warning(f"JSON parse error on cache variant attempt {attempt+1}: {e}")
             except Exception as e:
-                logger.warning(f"Error generating cache variants: {e}")
-                
-        return []
+                last_error = str(e)
+                logger.warning(f"Error generating cache variant on attempt {attempt+1}: {e}")
+        return None
 
-    async def generate(self, num_cases: int, previous_queries: Optional[List[str]] = None, previous_urls: Optional[List[str]] = None) -> List[TestCase]:
-        logger.info(f"Generating {num_cases} test cases via two-phase domain-bucket sampling...")
-        previous_queries = previous_queries or []
-        previous_urls = previous_urls or []
+    async def _fetch_variant_bounded(self, parent: TestCase, relationship: str) -> Optional[TestCase]:
+        async with self._semaphore:
+            return await self._fetch_variant(parent, relationship)
 
-        has_history = len(previous_queries) >= 3  # Need at least 3 past queries for a meaningful variant
+    async def generate_cache_variants(self, num_cases: int, history: TestCaseHistory) -> List[TestCase]:
+        # Weighted relationship pool: exact_duplicate is cheap/trivial (always hits cache)
+        # and provides minimal signal — downweight it. Upweight the harder, more informative cases.
+        relationship_weights = {
+            "exact_duplicate": 0.10,
+            "same_source_different_angle": 0.35,
+            "rephrased_same_intent": 0.30,
+            "subset_of_parent": 0.25,
+        }
+        relationships = list(relationship_weights.keys())
+        rel_weights = list(relationship_weights.values())
 
-        if not has_history:
-            # No (or too little) history: generate all cases as novel anchors.
-            # Cache is empty so variants would derive from nothing meaningful.
-            logger.info(f"[TestGenerator] No history (or < 3 queries) — generating all {num_cases} as novel anchors.")
+        parents = history.sample(num_cases)
+        if not parents:
+            return []
+            
+        tasks = []
+        for idx in range(num_cases):
+            parent = parents[idx % len(parents)]
+            rel = random.choices(relationships, weights=rel_weights, k=1)[0]
+            tasks.append(self._fetch_variant_bounded(parent, rel))
+            
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
+
+    async def generate(self, num_cases: int) -> List[TestCase]:
+        """Main entry point. Loads history internally and decides novel vs. cache variant mode."""
+        logger.info(f"Generating {num_cases} test cases via dynamic rubric-first model...")
+        history = TestCaseHistory()
+        
+        history_count = history.count()
+        if history_count < self.config.cache_variant_min_history:
+            logger.info(
+                f"[TestGenerator] History size {history_count} < minimum {self.config.cache_variant_min_history}. "
+                f"Generating all {num_cases} as novel cases."
+            )
             generate_variants = False
         else:
-            # With history: each call independently decides novel vs. variant.
-            # 65/35 split: 65% novel anchors, 35% cache variants.
             generate_variants = random.random() < 0.35
-            mode = "cache variants" if generate_variants else "novel anchors"
-            logger.info(f"[TestGenerator] History available ({len(previous_queries)} past queries). "
-                        f"This round: {num_cases} {mode} (coin flip).")
-
+            mode = "cache variants" if generate_variants else "novel cases"
+            logger.info(
+                f"[TestGenerator] History available ({history_count} cases). "
+                f"This round: {num_cases} {mode}."
+            )
+            
         if generate_variants:
-            # Variant-only round: skip Phase 1, derive all cases from history reference pool
-            num_anchors = 0
-            num_variants = num_cases
-            anchors = []
+            variants = await self.generate_cache_variants(num_cases, history)
+            needed = num_cases - len(variants)
+            if needed > 0:
+                logger.warning(
+                    f"[TestGenerator] Generated only {len(variants)}/{num_cases} valid cache variants. "
+                    f"Filling {needed} remainder with novel cases."
+                )
+                novel_cases = await self.generate_novel(needed, history)
+                variants.extend(novel_cases)
+            return variants
         else:
-            # Anchor-only round: all cases are novel domain-bucket anchors
-            num_anchors = num_cases
-            num_variants = 0
-
-            # Sample domain buckets with family uniqueness constraint:
-            # at most one bucket per family group can be selected per batch.
-            sampled_buckets = []
-            used_families = set()
-            shuffled = list(DOMAIN_BUCKETS)
-            random.shuffle(shuffled)
-            for bucket in shuffled:
-                if len(sampled_buckets) >= num_anchors:
-                    break
-                family = bucket.get("family", bucket["name"])
-                if family not in used_families:
-                    sampled_buckets.append(bucket)
-                    used_families.add(family)
-            # If still short (very large num_anchors), fill remainder without family constraint
-            remaining = [b for b in DOMAIN_BUCKETS if b not in sampled_buckets]
-            random.shuffle(remaining)
-            for bucket in remaining:
-                if len(sampled_buckets) >= num_anchors:
-                    break
-                sampled_buckets.append(bucket)
-
-            anchors = await self._generate_novel_anchors(sampled_buckets, previous_queries, previous_urls)
-
-        if generate_variants:
-            variants = await self._generate_cache_variants(anchors, previous_queries, previous_urls, num_variants)
-        else:
-            variants = []
-
-        all_cases = anchors + variants
-
-        if len(all_cases) < num_cases:
-            logger.warning(f"Only generated {len(all_cases)}/{num_cases} valid test cases.")
-
-        random.shuffle(all_cases)
-        return all_cases[:num_cases]
+            return await self.generate_novel(num_cases, history)
