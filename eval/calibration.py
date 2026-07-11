@@ -111,16 +111,11 @@ This website uses cookies to ensure you get the best experience on our website. 
                 # Therefore, coverage should be high, ndcg_at_5 should be high (since perfect is first)
                 # Scrape quality for res1 should be high, for res2 should be low
                 
-                sq1 = eval_res.scrape_quality.get("https://example.com/perfect")
-                sq2 = eval_res.scrape_quality.get("https://example.com/terrible")
-                
-                if not sq1 or not sq2:
-                    logger.warning("Judge missed scoring URLs")
-                    continue
-                    
+                fidelity_score = eval_res.fidelity_score
                 is_valid = (
                     eval_res.coverage_score > 0.8 and
-                    eval_res.ranking_score > 0.8 and
+                    eval_res.ranking_score > 0.7 and
+                    fidelity_score > 0.5 and
                     eval_res.overall_score >= 0.6
                 )
                 

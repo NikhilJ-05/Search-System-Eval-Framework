@@ -82,7 +82,8 @@ async def run_pipeline(num_cases: int = None):
                 elif t == "tc_complete":
                     logger.info(f"    [TC Complete] {ev['tc_id']}  overall={ev['overall']:.3f}")
                 elif t == "phase_progress":
-                    logger.info(f"Progress: Phase {ev['phase']} - {ev['progress_pct']}%")
+                    pct = (ev.get("current", 0) / max(1, ev.get("total", 1))) * 100
+                    logger.info(f"Progress: Phase {ev['phase']} - {pct:.1f}%")
                 elif t == "run_complete":
                     logger.info("=" * 60)
                     logger.info(f"  Run complete: {ev['run_id']}")

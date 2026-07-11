@@ -4,7 +4,7 @@ import time
 import logging
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -113,6 +113,16 @@ async def get_report(run_id: str):
     with open(path, "r", encoding="utf-8") as f:
         return {"markdown": f.read()}
 
+@app.get("/api/runs/{run_id}/logs")
+async def get_run_logs(run_id: str):
+    """Serve the raw session.log for a specific run."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "outputs", "runs", run_id, "session.log")
+    if not os.path.exists(path):
+        return PlainTextResponse("No session log found for this run.", status_code=404)
+    with open(path, "r", encoding="utf-8") as f:
+        return PlainTextResponse(f.read())
+
 @app.get("/api/runs/{run_id}/tc_report/{tc_id}")
 async def get_tc_report(run_id: str, tc_id: str):
     """Serve the individual markdown report for a specific test case in a run."""
@@ -181,15 +191,8 @@ async def search_kb(q: str):
 @app.get("/api/kb/stats")
 async def get_kb_stats():
     qdrant_stats = await qdrant.get_collection_stats()
-    tc_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "data", "test_cases.json")
-    tc_count = 0
-    if os.path.exists(tc_file):
-        try:
-            with open(tc_file, "r", encoding="utf-8") as f:
-                tcs = json.load(f)
-                tc_count = len(tcs)
-        except Exception:
-            pass
+    from eval.test_case_history import TestCaseHistory
+    tc_count = TestCaseHistory().count()
     return {
         "points_count": qdrant_stats.get("points_count", 0),
         "vectors_count": qdrant_stats.get("vectors_count", 0),

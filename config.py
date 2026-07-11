@@ -30,21 +30,22 @@ class EvalConfig:
     scrape_top_n: int = 5
     pass_threshold: float = 0.65
     dimension_floor: float = 0.40
+    sft_gold_score_threshold: float = 0.85
 
     # Cache settings
     kb_freshness_window_seconds: int = 600
     query_cache_similarity_threshold: float = 0.82
     judge_result_cache_ttl: int = 0
     # Minimum hybrid search score (RRF) for KB content to be reused instead of re-scraping
-    kb_content_score_threshold: float = 0.45
+    kb_content_score_threshold: float = 0.38
     query_cache_eviction_max_age_seconds: int = 3600
 
     # Concurrency settings
     max_concurrent_tcs: int = 10
 
     # Scoring weights
-    coverage_weight: float = 0.25
-    ranking_weight: float = 0.35
+    coverage_weight: float = 0.30
+    ranking_weight: float = 0.30
     scrape_weight: float = 0.40
 
     # Archetype weights (must sum to 1.0)
@@ -108,10 +109,11 @@ class EvalConfig:
             max_concurrent_tcs=int(os.environ.get("MAX_CONCURRENT_TCS", "10")),
             pass_threshold=float(os.environ.get("PASS_THRESHOLD", "0.65")),
             dimension_floor=float(os.environ.get("DIMENSION_FLOOR", "0.40")),
-            kb_content_score_threshold=float(os.environ.get("KB_CONTENT_SCORE_THRESHOLD", "0.45")),
+            sft_gold_score_threshold=float(os.environ.get("SFT_GOLD_THRESHOLD", "0.85")),
+            kb_content_score_threshold=float(os.environ.get("KB_CONTENT_SCORE_THRESHOLD", "0.38")),
             query_cache_eviction_max_age_seconds=int(os.environ.get("QUERY_CACHE_EVICTION_MAX_AGE", "3600")),
-            coverage_weight=float(os.environ.get("COVERAGE_WEIGHT", "0.25")),
-            ranking_weight=float(os.environ.get("RANKING_WEIGHT", "0.35")),
+            coverage_weight=float(os.environ.get("COVERAGE_WEIGHT", "0.30")),
+            ranking_weight=float(os.environ.get("RANKING_WEIGHT", "0.30")),
             scrape_weight=float(os.environ.get("SCRAPE_WEIGHT", "0.40")),
             cache_variant_min_history=int(os.environ.get("CACHE_VARIANT_MIN_HISTORY", "5"))
         )

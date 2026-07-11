@@ -31,6 +31,7 @@ class TestCaseDiagnosis:
     micro_pattern: Optional[dict] = None
     dpo_rationale: Optional[str] = None
     url_quality_annotations: List[dict] = field(default_factory=list)
+    query_reformulation: Optional[dict] = None
     
     # Forwarded from Judge
     criteria_summary: List[dict] = field(default_factory=list)
@@ -80,8 +81,10 @@ class ImprovementAgent:
         
         # Histograms
         overall_scores = [e.overall_score for e in eval_results]
-        cov_scores = [e.coverage_score for e in eval_results]
-        rank_scores = [e.ranking_score for e in eval_results]
+        dim_scores: Dict[str, List[float]] = {}
+        for e in eval_results:
+            for de in getattr(e, 'dimension_evals', []):
+                dim_scores.setdefault(de.dimension_name, []).append(de.score)
         
         def compute_hist(scores):
             bins = [0, 0, 0, 0, 0]
@@ -99,19 +102,23 @@ class ImprovementAgent:
             tc = tc_dict[res.test_case_id]
             intent = tc.intent
             if intent not in intent_stats:
-                intent_stats[intent] = {"count": 0, "overall": 0.0, "coverage": 0.0, "ranking": 0.0}
+                intent_stats[intent] = {"count": 0, "overall": 0.0}
             intent_stats[intent]["count"] += 1
             intent_stats[intent]["overall"] += res.overall_score
-            intent_stats[intent]["coverage"] += res.coverage_score
-            intent_stats[intent]["ranking"] += res.ranking_score
-        for intent in intent_stats:
-            c = intent_stats[intent]["count"]
-            intent_stats[intent] = {
+            for de in getattr(res, 'dimension_evals', []):
+                intent_stats[intent].setdefault(de.dimension_name, 0.0)
+                intent_stats[intent][de.dimension_name] += de.score
+        
+        for intent, stats in intent_stats.items():
+            c = stats["count"]
+            avg_stats = {
                 "count": c,
-                "avg_overall": round(intent_stats[intent]["overall"] / c, 3),
-                "avg_coverage": round(intent_stats[intent]["coverage"] / c, 3),
-                "avg_ranking": round(intent_stats[intent]["ranking"] / c, 3)
+                "avg_overall": round(stats["overall"] / c, 3)
             }
+            for k, v in stats.items():
+                if k not in ["count", "overall"]:
+                    avg_stats[f"avg_{k}"] = round(v / c, 3)
+            intent_stats[intent] = avg_stats
 
         # Difficulty breakdown
         diff_stats = {}
@@ -220,21 +227,20 @@ class ImprovementAgent:
                     issue_counts["Document_Gap"] = issue_counts.get("Document_Gap", 0) + 1
 
         avg_overall = sum(r.overall_score for r in eval_results) / max(1, len(eval_results))
-        avg_cov = sum(r.coverage_score for r in eval_results) / max(1, len(eval_results))
-        avg_rank = sum(r.ranking_score for r in eval_results) / max(1, len(eval_results))
+        avg_dims = {}
+        for dim, scores in dim_scores.items():
+            avg_dims[f"avg_{dim}"] = round(sum(scores) / max(1, len(scores)), 3)
 
         import dataclasses
         return {
             "summary": {
                 "total_tcs": len(eval_results),
                 "avg_overall": round(avg_overall, 3),
-                "avg_coverage": round(avg_cov, 3),
-                "avg_ranking": round(avg_rank, 3),
+                **avg_dims
             },
             "score_distributions": {
                 "overall": compute_hist(overall_scores),
-                "coverage": compute_hist(cov_scores),
-                "ranking": compute_hist(rank_scores)
+                **{name: compute_hist(scores) for name, scores in dim_scores.items()}
             },
             "intent_breakdown": intent_stats,
             "difficulty_breakdown": diff_stats,
@@ -267,13 +273,14 @@ class ImprovementAgent:
 
         agent_input = self._build_agent_input(test_cases, eval_results, search_results_dict, cache_analytics, retrieval_comparison, tc_diagnoses)
         
-        system_prompt = """You are a senior Search/IR engineer at Firecrawl. You have just received evaluation results from a comprehensive test run, including individual TestCase diagnoses. Your job is to:
+        system_prompt = """IMPORTANT: You MUST respond entirely in English. Do not use any Chinese or other non-English characters in your output.
+You are a senior Search/IR engineer at Firecrawl. You have just received evaluation results from a comprehensive test run, including individual TestCase diagnoses. Your job is to:
 1. Identify the TOP 5 root causes of failure, ranked by impact. Assign a confidence rating ("low", "medium", or "high") to each.
 2. For each root cause, propose a SPECIFIC engineering fix.
 3. Estimate the expected score improvement if the fix were applied.
 4. Flag any patterns that suggest systematic bias in the judge itself.
 5. Provide a list of "quick_wins" (fixes requiring low effort but having high impact).
-6. Detail "cross_dimension_patterns" representing systematic failures observed across multiple dimensions (e.g. coverage + ranking).
+6. Detail "cross_dimension_patterns" representing systematic failures observed across multiple dimensions. Analyze all dimension distributions provided in `score_distributions`. Use the actual dimension names from the data.
 7. Provide enhanced RL training patterns.
 
 Be concrete. Don't say "improve ranking". Say "the recency signal is too weak for queries containing year references — results from 2024 are ranking above 2026 content in 40% of rapidly_changing queries."
@@ -331,14 +338,15 @@ Output JSON schema:
 
         prompt = f"Analyze these evaluation results:\n\n{json.dumps(agent_input, indent=2)}"
 
+        use_response_format = None if "glm" in self.model.lower() else {"type": "json_object"}
         try:
             raw_response = await self.or_pool.generate(
                 prompt=prompt,
                 model=self.model,
                 temperature=0.2,
-                response_format={"type": "json_object"},
+                response_format=use_response_format,
                 system_prompt=system_prompt,
-                max_tokens=16000,
+                max_tokens=24000,
                 providers=self.providers
             )
             
@@ -347,6 +355,13 @@ Output JSON schema:
             json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', clean_response, re.DOTALL)
             if json_match:
                 clean_response = json_match.group(1)
+            
+            if len(clean_response) < 200:
+                logger.warning(f"Improvement agent output was suspiciously short ({len(clean_response)} chars). Likely truncated due to thinking budget.")
+                return ImprovementAnalysis(
+                    root_cause_summary="Analysis truncated by token limit.",
+                    macro_patterns=[], micro_patterns=[], quick_wins=[], cross_dimension_patterns=[]
+                )
             else:
                 start = min([i for i in (clean_response.find('{'), clean_response.find('[')) if i != -1] or [-1])
                 if start != -1:
@@ -425,7 +440,8 @@ Output JSON schema:
             )
             
         if passed and not floor_fails:
-            system_prompt = """You are a Search/IR improvement analyst at Firecrawl. This test case PASSED evaluation, but even passing results have optimization opportunities. Analyze the near-miss dimensions, identify structural patterns that could regress under harder queries, and suggest proactive improvements.
+            system_prompt = """IMPORTANT: You MUST respond entirely in English. Do not use any Chinese or other non-English characters in your output.
+You are a Search/IR improvement analyst at Firecrawl. This test case PASSED evaluation, but even passing results have optimization opportunities. Analyze the near-miss dimensions, identify structural patterns that could regress under harder queries, and suggest proactive improvements.
 Output JSON schema:
 {
   "root_cause_summary": "1-2 sentence description of near-misses or structural observations",
@@ -447,7 +463,8 @@ Output JSON schema:
 }"""
             prompt_header = "Find improvement opportunities for this PASSING test case:\n\n"
         else:
-            system_prompt = """You are a Search/IR diagnostics agent at Firecrawl. This test case FAILED evaluation. Diagnose the root cause of each failing dimension, identify the specific structural or content issue in the document profiles, and recommend 1-3 concrete fix actions.
+            system_prompt = """IMPORTANT: You MUST respond entirely in English. Do not use any Chinese or other non-English characters in your output.
+You are a Search/IR diagnostics agent at Firecrawl. This test case FAILED evaluation. Diagnose the root cause of each failing dimension, identify the specific structural or content issue in the document profiles, and recommend 1-3 concrete fix actions.
 Output JSON schema:
 {
   "root_cause_summary": "1-2 sentence description of main issue",
@@ -465,7 +482,12 @@ Output JSON schema:
   "dpo_rationale": "Rank X result (...) should be preferred over Rank Y (...) because...",
   "url_quality_annotations": [
     {"url": "<url>", "quality_score": <0.0 to 1.0>, "quality_note": "<short note>", "ideal_rank_suggestion": <int>}
-  ]
+  ],
+  "query_reformulation": {
+    "reformulated_query": "<a better query string that would have retrieved more relevant results>",
+    "rationale": "<1-2 sentences explaining why this reformulation improves coverage or ranking>",
+    "expected_delta": "<e.g. +0.15 coverage, +0.10 ranking>"
+  }
 }"""
             prompt_header = "Diagnose this FAILING test case:\n\n"
         
@@ -524,12 +546,13 @@ Output JSON schema:
         
         prompt = f"{prompt_header}{json.dumps(prompt_data, indent=2)}"
         
+        use_response_format = None if "glm" in self.model.lower() else {"type": "json_object"}
         try:
             raw_response = await self.or_pool.generate(
                 prompt=prompt,
                 model=self.model,
-                temperature=0.1,
-                response_format={"type": "json_object"},
+                temperature=0.3,
+                response_format=use_response_format,
                 system_prompt=system_prompt,
                 max_tokens=16000,
                 providers=self.providers
@@ -574,6 +597,7 @@ Output JSON schema:
                 micro_pattern=data.get("micro_pattern"),
                 dpo_rationale=data.get("dpo_rationale"),
                 url_quality_annotations=data.get("url_quality_annotations", []),
+                query_reformulation=data.get("query_reformulation"),
                 criteria_summary=criteria_summary
             )
         except Exception as e:

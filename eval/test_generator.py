@@ -127,7 +127,7 @@ class TestGenerator:
                 return False, [f"Dimension index {idx} has invalid weight value"]
                 
         total_weight = sum(float(d.get("weight", 0.0)) for d in dimensions)
-        if abs(total_weight - 1.0) > 0.15:
+        if abs(total_weight - 1.0) > 0.05:
             return False, [f"Rubric dimension weights must sum to approximately 1.0 (got {total_weight})"]
             
         return True, warnings
@@ -211,7 +211,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                         model=self.model,
                         temperature=0.8,
                         system_prompt=system_prompt,
-                        max_tokens=2500,
+                        max_tokens=4000,
                         providers=self.config.generator_providers
                     )
                     
@@ -221,6 +221,11 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                         if is_valid:
                             dimensions = data["rubric"]["dimensions"]
                             total_w = sum(d["weight"] for d in dimensions)
+                            if total_w == 0:
+                                equal_w = round(1.0 / len(dimensions), 4)
+                                for d in dimensions:
+                                    d["weight"] = equal_w
+                                total_w = 1.0
                             if abs(total_w - 1.0) > 0.001:
                                 for d in dimensions:
                                     d["weight"] = round(d["weight"] / total_w, 2)
@@ -366,7 +371,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                     model=self.model,
                     temperature=0.7,
                     system_prompt=system_prompt,
-                    max_tokens=2500,
+                    max_tokens=4000,
                     providers=self.config.generator_providers
                 )
                 
@@ -376,6 +381,11 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                     if is_valid:
                         dimensions = data["rubric"]["dimensions"]
                         total_w = sum(d["weight"] for d in dimensions)
+                        if total_w == 0:
+                            equal_w = round(1.0 / len(dimensions), 4)
+                            for d in dimensions:
+                                d["weight"] = equal_w
+                            total_w = 1.0
                         if abs(total_w - 1.0) > 0.001:
                             for d in dimensions:
                                 d["weight"] = round(d["weight"] / total_w, 2)

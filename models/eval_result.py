@@ -147,4 +147,6 @@ class EvalResult:
 
     def to_dict(self) -> dict:
         import dataclasses
-        return dataclasses.asdict(self)
+        d = dataclasses.asdict(self)
+        d["dimensions"] = {de.dimension_name: de.score for de in self.dimension_evals}
+        return d

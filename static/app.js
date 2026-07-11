@@ -107,6 +107,10 @@ document.addEventListener('DOMContentLoaded', () => {
         currentRunId = runId;
         document.getElementById('header-run-id').textContent = `Viewing: ${runId}`;
         
+        const btnLogs = document.getElementById('btn-view-logs');
+        btnLogs.style.display = 'inline-block';
+        btnLogs.onclick = () => window.open(`/api/runs/${runId}/logs`, '_blank');
+        
         try {
             // Skeleton Views setup
             showSkeletons();
@@ -166,6 +170,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
             tabBtns[0].click(); // Live view
             document.getElementById('header-run-id').textContent = `Live: ${runId}`;
+            
+            const btnLogs = document.getElementById('btn-view-logs');
+            btnLogs.style.display = 'inline-block';
+            btnLogs.onclick = () => window.open(`/api/runs/${runId}/logs`, '_blank');
 
             const dot = document.getElementById('live-dot');
             const statusText = document.getElementById('live-status-text');
@@ -183,7 +191,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (sseSource) sseSource.close();
 
-            sseSource = new EventSource(`/api/runs/${runId}/live`);
+            sseSource = new EventSource(`/api/runs/${runId}/stream`);
             
             sseSource.onmessage = (e) => {
                 const ev = JSON.parse(e.data);
@@ -267,13 +275,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="live-tc-info">
                     <span class="live-tc-id">${ev.tc_id}</span>
                 </div>
-                <div class="live-tc-score" style="color:${ev.overall >= 0.8 ? 'var(--success)' : 'var(--warning)'}">${ev.overall.toFixed(3)}</div>
+                <div class="live-tc-score" style="color:${ev.passed ? 'var(--success)' : 'var(--warning)'}">${ev.overall.toFixed(3)}</div>
             `;
             liveScores.prepend(card);
             
             // Update progress
             const currentW = parseFloat(prog.style.width) || 0;
             prog.style.width = Math.min(95, currentW + 5) + '%';
+        } else if (ev.type === 'phase_progress') {
+            const currentW = parseFloat(prog.style.width) || 0;
+            const newW = (ev.current / Math.max(1, ev.total)) * 100;
+            prog.style.width = Math.max(currentW, newW) + '%';
+            return; // don't add to timeline to reduce noise
+        } else if (ev.type === 'query_cache_hit') {
+            contentHtml = `
+                <h4>Cache Hit <span class="tc-id">${ev.tc_id}</span></h4>
+                <div style="font-size: 0.85rem; color:var(--text-secondary)">Similarity: ${(ev.similarity || 0).toFixed(2)}</div>
+            `;
+        } else if (ev.type === 'firecrawl_scrape_done') {
+            contentHtml = `
+                <h4>Scrape Done <span class="tc-id">${ev.tc_id}</span></h4>
+                <div style="font-size: 0.85rem; color:var(--text-secondary)">URL: ${ev.url}</div>
+            `;
+        } else if (ev.type === 'tc_diagnosis_complete') {
+            contentHtml = `
+                <h4>Diagnosis Complete <span class="tc-id">${ev.tc_id}</span></h4>
+                <p style="font-size: 0.85rem; margin:4px 0 0 0;">Root cause analyzed for failure.</p>
+            `;
+            iconClass = 'warning';
+        } else if (ev.type === 'round_complete') {
+            contentHtml = `
+                <h4>Round Complete <span class="tc-id">Round ${ev.round}</span></h4>
+            `;
+            iconClass = 'success';
+        } else if (ev.type === 'judge_scored') {
+            contentHtml = `
+                <h4>Judge Scored <span class="tc-id">${ev.tc_id}</span></h4>
+                <div style="font-size: 0.85rem; margin-top:4px;">
+                    Overall: <span style="color:var(--accent-2)">${ev.overall.toFixed(3)}</span>
+                </div>
+            `;
+        } else if (ev.type === 'indexed') {
+            return; // skip timeline noise for indexing
         } else {
             contentHtml = `<h4>${ev.type}</h4>`;
         }
@@ -296,8 +339,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!config || Object.keys(config).length === 0) return;
         panel.classList.remove('hidden');
         panel.innerHTML = `
-            <div class="config-item">Model: <strong>${config.model || 'Unknown'}</strong></div>
-            <div class="config-item">Workers: <strong>${config.max_workers || 1}</strong></div>
+            <div class="config-item">Generator: <strong>${config.generator_model || 'Unknown'}</strong></div>
+            <div class="config-item">Judge: <strong>${config.judge_model || 'Unknown'}</strong></div>
+            <div class="config-item">Test Cases: <strong>${config.num_test_cases || '—'}</strong></div>
+            <div class="config-item">Pass Threshold: <strong>${config.pass_threshold || 0.65}</strong></div>
+            <div class="config-item">Concurrency: <strong>${config.max_concurrent_tcs || 1}</strong></div>
         `;
     }
 
@@ -339,10 +385,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const dimTotals = {};
         const dimCounts = {};
         
+        let passThreshold = currentMetadata?.pass_threshold || 0.65;
+        
         data.forEach(tc => {
             const sc = tc.overall_score || 0;
             overall += sc;
-            if (sc >= 0.8) passed++;
+            if (sc >= passThreshold) passed++;
             if (sc > bestScore) { bestScore = sc; bestQuery = tc.test_case_id; }
             if (sc < worstScore) { worstScore = sc; worstQuery = tc.test_case_id; }
             
@@ -563,6 +611,70 @@ document.addEventListener('DOMContentLoaded', () => {
                         `).join('')}
                     </div>
                 `;
+            }
+
+            // Taxonomy
+            const taxonomyContainer = document.getElementById('rl-panel-taxonomy');
+            if (!rlData.taxonomy || !rlData.taxonomy.length) {
+                taxonomyContainer.innerHTML = '<div class="empty-msg">No pattern taxonomy generated.</div>';
+            } else {
+                taxonomyContainer.innerHTML = `
+                    <div style="display:flex; flex-direction:column; gap:16px;">
+                        ${rlData.taxonomy.map(t => `
+                            <div class="stat-box" style="border-left: 4px solid var(--accent-1);">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <strong>${t.issue}</strong>
+                                    <span class="stage-pill ${t.severity === 'critical' ? 'error' : (t.severity === 'high' ? 'warning' : 'done')}">${t.severity}</span>
+                                </div>
+                                <p style="margin: 8px 0 4px 0; font-size:0.9rem;">${t.description}</p>
+                                <div style="font-size:0.85rem; color:var(--text-secondary)">
+                                    <em>Fix: ${t.suggested_fix}</em>
+                                    <br>Frequency: ${t.frequency}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            // Rewards
+            const rewardsContainer = document.getElementById('rl-panel-rewards');
+            if (!rlData.reward_signals || !rlData.reward_signals.length) {
+                rewardsContainer.innerHTML = '<div class="empty-msg">No reward signals generated.</div>';
+            } else {
+                rewardsContainer.innerHTML = `
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead><tr><th>URL</th><th>Composite Reward</th><th>Trajectory Δ</th><th>Components</th></tr></thead>
+                            <tbody>${rlData.reward_signals.map(r => `
+                                <tr>
+                                    <td><div style="max-width:300px; overflow:hidden; text-overflow:ellipsis;" title="${r.url}">${r.url}</div></td>
+                                    <td><strong>${r.composite_reward.toFixed(3)}</strong></td>
+                                    <td>${r.trajectory?.rank_delta > 0 ? '+' : ''}${r.trajectory?.rank_delta} (Rank ${r.trajectory?.search_rank} → ${r.trajectory?.ideal_rank})</td>
+                                    <td style="font-size:0.8rem; color:var(--text-secondary)">
+                                        Rel: ${r.reward_components?.relevance?.toFixed(2)} | 
+                                        Cmp: ${r.reward_components?.completeness?.toFixed(2)} | 
+                                        Frsh: ${r.reward_components?.freshness?.toFixed(2)}
+                                    </td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            // Export Button
+            const exportBtn = document.getElementById('btn-export-rl');
+            if (exportBtn) {
+                exportBtn.onclick = () => {
+                    const blob = new Blob([JSON.stringify(rlData.dpo_pairs, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `dpo_pairs_${runId}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
             }
         } catch (e) {
             console.error('populateRLSignals error:', e);

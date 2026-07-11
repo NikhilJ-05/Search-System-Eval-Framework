@@ -410,7 +410,7 @@ RULES:
 Document Title: {title}
 
 FULL DOCUMENT CONTENT:
-{full_markdown[:35000]}
+{full_markdown}
 
 Extract a complete content profile. Output ONLY a JSON object matching this schema exactly:
 {{
@@ -443,7 +443,7 @@ Extract a complete content profile. Output ONLY a JSON object matching this sche
                 prompt=user_prompt,
                 model=self.extraction_model,
                 temperature=0.0,
-                max_tokens=4096,
+                max_tokens=8192,
                 system_prompt=system_prompt,
                 response_format={"type": "json_object"}
             )
@@ -588,8 +588,8 @@ EXECUTE THESE 5 STEPS AND OUTPUT JSON:
             resp = await self.or_pool.generate(
                 prompt=user_prompt,
                 model=self.judge_model,
-                temperature=0.1,
-                max_tokens=2500,
+                temperature=0.0,
+                max_tokens=3500,
                 system_prompt=system_prompt,
                 response_format={"type": "json_object"}
             )
@@ -639,7 +639,9 @@ EXECUTE THESE 5 STEPS AND OUTPUT JSON:
     async def evaluate(self, test_case: TestCase, search_results: list[FirecrawlSearchResult]) -> EvalResult:
         logger.info(f"Evaluating tc: {test_case.id} with Extract-then-Evaluate two-phase Judge...")
 
-        cache_str = f"{test_case.query}|{sorted([r.url for r in search_results])}"
+        rubric_str = str([(d.name, d.weight) for d in test_case.rubric.dimensions]) if getattr(test_case, "rubric", None) else ""
+        content_str = "|".join(sorted([hashlib.sha256((r.full_markdown or "").encode()).hexdigest()[:16] for r in search_results]))
+        cache_str = f"{test_case.query}|{rubric_str}|{content_str}"
         cache_key = hashlib.sha256(cache_str.encode("utf-8")).hexdigest()
         if cache_key in self._judge_cache:
             logger.info(f"[Judge] Cache hit for {test_case.id}")

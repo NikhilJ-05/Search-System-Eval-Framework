@@ -6,7 +6,7 @@ import json
 import hashlib
 import dataclasses
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from config import EvalConfig
 from clients.openrouter import OpenRouterClientPool
 from clients.firecrawl_client import FirecrawlClientPool
@@ -24,7 +24,7 @@ from reports.regression import RegressionDetector
 from eval.calibration import JudgeCalibration
 from eval.improvement_agent import ImprovementAgent
 from models.test_case import TestCase
-from models.eval_result import FirecrawlSearchResult
+from models.eval_result import FirecrawlSearchResult, EvalResult
 import contextvars
 from pipeline.store import PipelineStore, RunMetadata
 
@@ -49,8 +49,8 @@ class Orchestrator:
         self.indexer = Indexer(self.qdrant, self.embedder)
         self.retriever = Retriever(self.qdrant, self.embedder)
         
-        self.comparator = RankingComparator(config, self.or_pool)
-        self.signal_gen = SignalGenerator(config)
+        self.comparator = RankingComparator()
+        self.signal_gen = SignalGenerator()
         self.report_builder = ReportBuilder(config)
         self.regression_detector = RegressionDetector()
         self.improvement_agent = ImprovementAgent(config, self.or_pool)
@@ -61,6 +61,10 @@ class Orchestrator:
         self.live_dpo_pairs = []
         self.live_reward_signals = []
         self.live_micro_patterns = []
+        self.live_listwise_rankings = []
+        self.live_contrastive_fail_pairs = []
+        self.live_query_reformulations = []
+        self.live_scrape_quality_labels = []
         self.live_eval_results = []
         self.live_test_cases = []
 
@@ -86,34 +90,6 @@ class Orchestrator:
             self.store.write_run_atomic(run_id, run_payload)
             
         await asyncio.to_thread(_write)
-
-    def _load_existing_test_cases(self) -> List[TestCase]:
-        """Load any previously persisted test cases (for resume support only — not for bulk generation)."""
-        data_dir = os.path.join(APP_DIR, "outputs", "data")
-        tc_file = os.path.join(data_dir, "test_cases.json")
-        if os.path.exists(tc_file):
-            try:
-                with open(tc_file, "r", encoding="utf-8") as f:
-                    raw_list = json.load(f)
-                    tcs = [TestCase.from_dict(d) for d in raw_list]
-                logger.info(f"[Orchestrator] Loaded {len(tcs)} existing test cases for history.")
-                return tcs
-            except Exception as e:
-                logger.warning(f"[Orchestrator] Could not load existing test cases: {e}")
-        return []
-
-    async def _persist_test_cases_async(self, test_cases: List[TestCase]) -> None:
-        """Persist the accumulated test case list so a crashed run can be resumed."""
-        data_dir = os.path.join(APP_DIR, "outputs", "data")
-        os.makedirs(data_dir, exist_ok=True)
-        tc_file = os.path.join(data_dir, "test_cases.json")
-        def _write():
-            with open(tc_file, "w", encoding="utf-8") as f:
-                json.dump([dataclasses.asdict(tc) for tc in test_cases], f, indent=2)
-        try:
-            await asyncio.to_thread(_write)
-        except Exception as e:
-            logger.warning(f"[Orchestrator] Failed to save test cases: {e}")
 
     async def _fetch_previous_urls(self) -> List[str]:
         """Fetch URLs already indexed in the KB so the generator can avoid them."""
@@ -153,9 +129,9 @@ class Orchestrator:
 
             # Layer 1: Query Cache
             cached_query, query_dense_vec, query_sparse_vec = await self.retriever.find_similar_query(
-                tc.query, 
+                tc.query,
                 threshold=self.config.query_cache_similarity_threshold,
-                max_age_seconds=self.config.kb_freshness_window_seconds * 10
+                max_age_seconds=self.config.query_cache_eviction_max_age_seconds
             )
             
             if cached_query:
@@ -290,6 +266,27 @@ class Orchestrator:
             # Persist successfully processed test case to the test case history store
             self.history.append(tc)
 
+            for de in eval_res.dimension_evals:
+                self._emit_event({
+                    "type": "dimension_scored",
+                    "tc_id": tc.id,
+                    "dimension": de.dimension_name,
+                    "score": de.score,
+                    "level": de.assigned_level,
+                    "weight": de.weight
+                })
+
+            self._emit_event({
+                "type": "tc_complete",
+                "tc_id": tc.id,
+                "overall": eval_res.overall_score,
+                "passed": eval_res.passes(self.config.pass_threshold, getattr(self.config, 'dimension_floor', 0.40)),
+                "dimension_scores": [
+                    {"name": d.dimension_name, "score": d.score}
+                    for d in eval_res.dimension_evals
+                ]
+            })
+
             self._emit_event({
                 "type": "judge_scored",
                 "tc_id": tc.id,
@@ -329,7 +326,7 @@ class Orchestrator:
             self.live_tc_diagnoses.append(diagnosis)
             
             # Step 2: Programmatic RL signals
-            tc_dpo, tc_rewards, tc_pattern = self.signal_gen.generate_tc_signals(
+            tc_dpo, tc_rewards, tc_pattern, tc_listwise, tc_cf_pairs, tc_sq_labels = self.signal_gen.generate_tc_signals(
                 tc, eval_res, search_results, diagnosis
             )
             if tc_dpo:
@@ -338,6 +335,17 @@ class Orchestrator:
                 self.live_reward_signals.extend(tc_rewards)
             if tc_pattern:
                 self.live_micro_patterns.append(tc_pattern)
+            if tc_listwise:
+                self.live_listwise_rankings.append(tc_listwise)
+            if tc_cf_pairs:
+                self.live_contrastive_fail_pairs.extend(tc_cf_pairs)
+            if tc_sq_labels:
+                self.live_scrape_quality_labels.extend(tc_sq_labels)
+
+            # Query reformulation from diagnosis
+            tc_reformulation = self.signal_gen._generate_query_reformulation(tc, diagnosis)
+            if tc_reformulation:
+                self.live_query_reformulations.append(tc_reformulation)
             
             # Step 3: Per-TC report
             await self.report_builder.build_single_tc_report_async(
@@ -379,6 +387,14 @@ class Orchestrator:
         )
         self.store.write_run_metadata(run_id, initial_meta)
         
+        # Setup session file logger
+        run_dir = os.path.join(self.store.runs_dir, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        session_log_path = os.path.join(run_dir, "session.log")
+        file_handler = logging.FileHandler(session_log_path, mode='a', encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(file_handler)
+        
         self._emit_event({
             "type": "run_start", 
             "run_id": run_id,
@@ -408,12 +424,11 @@ class Orchestrator:
 
             # Rolling generation: TCs are generated round-by-round so each round
             # can use the query history + freshly indexed KB from all prior rounds.
-            # Load any existing TCs from disk for resume support (already-processed history).
-            all_test_cases: List[TestCase] = self._load_existing_test_cases()
+            all_test_cases: List[TestCase] = []
             self.current_run_id = run_id
-            self.live_test_cases = all_test_cases
+            self.live_test_cases = []
             self.live_tc_diagnoses = []
-            await self._save_live_run(run_id, all_test_cases, [], [])
+            await self._save_live_run(run_id, [], [], [])
 
             all_eval_results = []
             all_search_results = {}
@@ -440,9 +455,6 @@ class Orchestrator:
                 self.live_test_cases = all_test_cases
                 self._emit_event({"type": "test_case_created", "tc_id": tc.id, "query": tc.query})
                 
-                # Persist so a restart can resume from where we left off
-                await self._persist_test_cases_async(all_test_cases)
-
                 # --- Execute this TC ---
                 self._emit_event({"type": "phase_start", "phase": "execution",
                                   "message": f"Executing TC {i+1}/{total_needed}...",
@@ -481,7 +493,7 @@ class Orchestrator:
             # tc_diagnoses is now completely populated from background tasks
             tc_diagnoses = self.live_tc_diagnoses
             tc_report_paths = [
-                os.path.join(APP_DIR, "outputs", "runs", run_id, "reports", "tc_reports", f"{tc.id}.md")
+                os.path.join(APP_DIR, "outputs", "runs", run_id, "tc_reports", f"{tc.id}.md")
                 for tc in all_test_cases
             ]
 
@@ -496,7 +508,24 @@ class Orchestrator:
             
             # Feed enhanced patterns back into RL signals
             self.signal_gen.update_patterns(improvement_analysis.enhanced_patterns)
-            await self.signal_gen.save_signals_async(self.live_dpo_pairs, self.live_reward_signals, self.signal_gen.patterns, run_id)
+            
+            # Phase 6.75: SFT Gold generation
+            self._emit_event({"type": "phase_start", "phase": "sft_gold"})
+            sft_gold = self.signal_gen._generate_sft_gold(
+                all_test_cases, all_eval_results, tc_diagnoses, all_search_results, self.config.sft_gold_score_threshold
+            )
+            
+            await self.signal_gen.save_signals_async(
+                self.live_dpo_pairs, 
+                self.live_reward_signals, 
+                self.signal_gen.patterns, 
+                run_id,
+                listwise_rankings=self.live_listwise_rankings,
+                contrastive_fail_pairs=self.live_contrastive_fail_pairs,
+                query_reformulations=self.live_query_reformulations,
+                sft_gold=sft_gold,
+                scrape_quality_labels=self.live_scrape_quality_labels
+            )
 
             # Final round indexing is already complete since we gather and await all _process_tc tasks per round
             pass
@@ -517,7 +546,23 @@ class Orchestrator:
             rl_summary = {
                 "dpo_pairs": len(self.live_dpo_pairs),
                 "reward_signals": len(self.live_reward_signals),
-                "patterns": self.signal_gen.patterns
+                "patterns": self.signal_gen.patterns,
+                "listwise_rankings": len(self.live_listwise_rankings),
+                "contrastive_fail_pairs": len(self.live_contrastive_fail_pairs),
+                "query_reformulations": len(self.live_query_reformulations),
+                "sft_gold_examples": len(sft_gold) if sft_gold else 0,
+                "scrape_quality_labels": len(self.live_scrape_quality_labels),
+            }
+            
+            duration_s = time.time() - start_time
+            run_meta = {
+                "generator_model": self.config.generator_model,
+                "judge_model": self.config.judge_model,
+                "improvement_agent_model": getattr(self.config, "improvement_agent_model", ""),
+                "pass_threshold": self.config.pass_threshold,
+                "dimension_floor": getattr(self.config, "dimension_floor", 0.40),
+                "num_test_cases": self.config.num_test_cases,
+                "duration_s": duration_s,
             }
             
             # Pass everything to report builder (using async thread wrapper)
@@ -532,7 +577,8 @@ class Orchestrator:
                 kb_rankings=kb_rankings,
                 comparator=self.comparator,
                 improvement_analysis=improvement_analysis,
-                tc_diagnoses=tc_diagnoses
+                tc_diagnoses=tc_diagnoses,
+                run_meta=run_meta
             )
             
             # Persist results asynchronously in dedicated run folder
@@ -548,7 +594,7 @@ class Orchestrator:
                 "status": "completed"
             }
             
-            duration_s = time.time() - start_time
+            # duration_s was already calculated above
             overall_score = sum(e.overall_score for e in all_eval_results) / max(1, len(all_eval_results))
             
             final_meta = RunMetadata(
@@ -583,6 +629,9 @@ class Orchestrator:
             
             error_meta = RunMetadata(run_id=run_id, status="cancelled", started_at=getattr(initial_meta, "started_at", None))
             self.store.write_run_metadata(run_id, error_meta)
+            existing = self.store._get_full_run(run_id) or {}
+            existing["status"] = "cancelled"
+            self.store.write_run_atomic(run_id, existing)
             self._emit_event({"type": "run_error", "error": "Cancelled by client"})
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)
@@ -592,5 +641,8 @@ class Orchestrator:
             self._emit_event({"type": "run_error", "error": str(e)})
         finally:
             await self.or_pool.aclose()
+            if 'file_handler' in locals():
+                logging.getLogger().removeHandler(file_handler)
+                file_handler.close()
             
         return run_id
