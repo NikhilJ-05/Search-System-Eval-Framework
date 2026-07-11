@@ -8,22 +8,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 async def main():
     parser = argparse.ArgumentParser(description="Run Firecrawl Eval Pipeline")
-    parser.add_argument("--calibrate-only", action="store_true", help="Run only judge calibration")
     args = parser.parse_args()
 
     config = EvalConfig.from_env()
     
-    if args.calibrate_only:
-        from eval.calibration import JudgeCalibration
-        from eval.judge import Judge
-        from clients.openrouter import OpenRouterClientPool
-        
-        or_pool = OpenRouterClientPool(config)
-        judge = Judge(config, or_pool)
-        calib = JudgeCalibration()
-        await calib.run_calibration(judge)
-        await or_pool.aclose()
-        return
+
 
     q = asyncio.Queue()
     

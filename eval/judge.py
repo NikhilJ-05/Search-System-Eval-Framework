@@ -12,7 +12,8 @@ from models.eval_result import (
     FirecrawlSearchResult,
     CriteriaCheck,
     DimensionEval,
-    EvalResult
+    EvalResult,
+    P1Result
 )
 from clients.openrouter import OpenRouterClientPool
 from config import EvalConfig
@@ -22,273 +23,146 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.dirname(BASE_DIR)
 
-QUALITY_KEYWORDS = ["coverage", "content", "accuracy", "relevance", "completeness", "information"]
-RANKING_KEYWORDS = ["ranking", "authority", "source", "ordering", "priority", "domain"]
-FIDELITY_KEYWORDS = ["fidelity", "structure", "scrape", "noise", "markdown", "formatting", "table"]
+# Numeric band for each scoring level
+LEVEL_RANGES: dict[str, tuple[float, float]] = {
+    "L1": (0.00, 0.20),
+    "L2": (0.20, 0.40),
+    "L3": (0.40, 0.60),
+    "L4": (0.60, 0.80),
+    "L5": (0.80, 1.00),
+}
 
 BASELINE_DIMENSIONS = {
-    "quality": RubricDimension(
-        name="_baseline_coverage",
-        weight=0.15,
-        criteria="Search results contain content directly relevant to the query intent. Key factual claims addressing the query are present across the returned results.",
-        contrastive_fail="Fails if no result addresses the core question, or all results are tangential/off-topic."
+    "fidelity": RubricDimension(
+        name="_baseline_fidelity",
+        weight=0.12,
+        criteria="Scraped markdown preserves the page's structural elements and content is complete without boilerplate leakage.",
+        contrastive_fail="Fails if tables are flattened, content is truncated, or navigation noise dominates."
     ),
     "ranking": RubricDimension(
         name="_baseline_ranking",
-        weight=0.15,
-        criteria="Higher-authority and more relevant sources appear before lower-quality ones. Official or primary sources should rank above blogs and aggregators.",
-        contrastive_fail="Fails if blog posts or aggregator pages rank above official/primary sources, or if the most relevant result is buried below rank 3."
+        weight=0.12,
+        criteria="Higher-authority and more relevant sources appear before lower-quality ones.",
+        contrastive_fail="Fails if blogs rank above official sources, or if most relevant result is buried."
     ),
-    "fidelity": RubricDimension(
-        name="_baseline_fidelity",
-        weight=0.15,
-        criteria="Scraped markdown preserves the page's structural elements (tables, headings, code blocks, lists) and content is complete without navigation noise or boilerplate leakage.",
-        contrastive_fail="Fails if tables are flattened to plain text, content is truncated mid-section, or navigation/cookie banners dominate the markdown."
+    "coverage": RubricDimension(
+        name="_baseline_coverage",
+        weight=0.12,
+        criteria="Search results collectively contain the information the query requires and address the intent.",
+        contrastive_fail="Fails if critical information gaps exist across all results."
+    ),
+    "authority": RubricDimension(
+        name="_baseline_authority",
+        weight=0.07,
+        criteria="The portfolio of sources is credible and appropriate for this query type.",
+        contrastive_fail="Fails if untrustworthy or low-credibility sources are given undue weight."
+    ),
+    "freshness": RubricDimension(
+        name="_baseline_freshness",
+        weight=0.07,
+        criteria="Content is temporally appropriate for the query.",
+        contrastive_fail="Fails if results are outdated for a time-sensitive query."
     ),
 }
 
+AUTHORITATIVE_TLDS = [
+    ".gov", ".mil", ".go.jp", ".lg.jp", ".gc.ca",
+    ".gov.uk", ".mod.uk", ".nhs.uk", ".gouv.fr",
+    ".gob.mx", ".gob.es", ".gob.ar", ".gov.au", ".csiro.au",
+    ".govt.nz", ".gov.in", ".admin.ch", ".bund.de",
+    ".europa.eu", ".un.org", ".who.int", ".ilo.org",
+    ".nato.int", ".imf.org", ".worldbank.org",
+]
+ACADEMIC_TLDS = [".edu", ".ac.uk", ".ac.jp", ".edu.au", ".ac.nz"]
+ORG_TLDS = [".org"]
 
-def extract_structure_profile(markdown: str, url: str = "", title: str = "") -> dict:
+def _classify_domain_type(url: str) -> str:
+    if not url:
+        return "unknown"
+    url_lower = url.lower()
+    if any(tld in url_lower for tld in AUTHORITATIVE_TLDS):
+        return "authoritative"
+    if any(tld in url_lower for tld in ACADEMIC_TLDS):
+        return "academic"
+    if any(tld in url_lower for tld in ORG_TLDS):
+        return "organization"
+    return "commercial"
+
+def _clamp_score_to_level(level: str, score: float) -> float:
+    score = max(0.0, min(1.0, score))
+    if level in LEVEL_RANGES:
+        lo, hi = LEVEL_RANGES[level]
+        if not (lo - 0.01 <= score <= hi + 0.01):
+            clamped = max(lo, min(hi, score))
+            logger.warning(
+                f"[Judge] Level/score mismatch: level={level} ({lo:.1f}–{hi:.1f}) but score={score:.2f}. "
+                f"Clamping to {clamped:.2f}."
+            )
+            return clamped
+    return score
+
+def _validate_p1_consistency(result: P1Result) -> P1Result:
     """
-    Full programmatic document analysis. No LLM. No truncation.
-    Returns a complete structural fingerprint of the markdown.
+    Deterministic post-processor. Enforces logical constraints the model should uphold
+    from goal-framing alone, but may occasionally violate. Does not substitute for
+    prompt quality — it's the hard backstop only.
     """
-    if not markdown:
-        markdown = ""
-    lines = markdown.split("\n")
-    total_chars = len(markdown)
-    total_lines = len(lines)
-    total_words = len(markdown.split())
+    if result.content_completeness in ("navigation_only", "error_page"):
+        result.key_claims = []
+        result.data_points = []
+        result.scrape_score = min(result.scrape_score, 0.20)
+        result.scrape_level = "L1" if result.scrape_score <= 0.20 else result.scrape_level
+        result.query_relevance_score = min(result.query_relevance_score, 0.10)
 
-    headings = []
-    for i, line in enumerate(lines):
-        m = re.match(r'^(#{1,6})\s+(.*)', line)
-        if m:
-            headings.append({
-                "level": len(m.group(1)),
-                "text": m.group(2).strip(),
-                "line": i + 1
-            })
+    if result.word_count < 150:
+        result.key_claims = result.key_claims[:2]
+        result.section_summaries = result.section_summaries[:1]
 
-    tables = []
-    in_table = False
-    table_start = 0
-    table_rows = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if "|" in stripped and not in_table:
-            in_table = True
-            table_start = i + 1
-            table_rows = 1
-        elif in_table and "|" in stripped:
-            table_rows += 1
-        elif in_table:
-            header_line = lines[table_start - 1]
-            col_count = len([c for c in header_line.split("|") if c.strip()]) if header_line else 0
-            tables.append({
-                "start_line": table_start,
-                "end_line": i,
-                "row_count": table_rows,
-                "col_count": col_count,
-                "position_pct": round(table_start / max(total_lines, 1) * 100, 1)
-            })
-            in_table = False
-            table_rows = 0
+    if result.authority_score > 0.7 and not result.authority_assessment.strip():
+        result.authority_score = 0.5
 
-    code_blocks = []
-    in_code = False
-    code_lang = ""
-    code_start = 0
-    for i, line in enumerate(lines):
-        if line.startswith("```") and not in_code:
-            in_code = True
-            code_lang = line[3:].strip()
-            code_start = i + 1
-        elif line.startswith("```") and in_code:
-            code_blocks.append({
-                "language": code_lang or "unknown",
-                "start_line": code_start,
-                "end_line": i,
-                "line_count": i - code_start
-            })
-            in_code = False
+    if result.scrape_level == "L5" and result.content_completeness in ("appears_truncated", "partial"):
+        result.scrape_level = "L4"
+        result.scrape_score = min(result.scrape_score, 0.79)
 
-    bullet_list_items = sum(1 for l in lines if re.match(r'^\s*[-*+]\s', l))
-    numbered_list_items = sum(1 for l in lines if re.match(r'^\s*\d+\.\s', l))
+    if result.detected_language not in ("en", "mixed", "en-US", "en-GB", ""):
+        result.query_relevance_score = 0.0
 
-    all_links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)', markdown)
-    images = re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', markdown)
-    external_links = [l for l in all_links if l[1].startswith("http")]
-
-    nav_link_lines = sum(1 for l in lines if len(re.findall(r'\[.*?\]\(.*?\)', l)) >= 2)
-    cookie_banner = bool(re.search(
-        r'(cookie|consent|accept.*decline|we use cookies|privacy policy.*accept)',
-        markdown, re.I
-    ))
-    boilerplate_patterns = [
-        r'(copyright|©|\ball rights reserved\b)',
-        r'(subscribe to our newsletter)',
-        r'(follow us on|share this article)',
-        r'(terms of service|terms and conditions)',
-        r'(advertisement|sponsored content)',
-    ]
-    boilerplate_hits = sum(1 for p in boilerplate_patterns if re.search(p, markdown, re.I))
-
-    line_counts = Counter(l.strip() for l in lines if len(l.strip()) > 20)
-    repeated_blocks = [text for text, count in line_counts.items() if count >= 3]
-
-    q = total_chars // 4
-    quarters = [
-        markdown[0:q], markdown[q:2*q],
-        markdown[2*q:3*q], markdown[3*q:]
-    ]
-    content_density = {
-        "q1_words": len(quarters[0].split()),
-        "q2_words": len(quarters[1].split()),
-        "q3_words": len(quarters[2].split()),
-        "q4_words": len(quarters[3].split()),
-        "q1_tables": sum(1 for t in tables if t["position_pct"] <= 25),
-        "q2_tables": sum(1 for t in tables if 25 < t["position_pct"] <= 50),
-        "q3_tables": sum(1 for t in tables if 50 < t["position_pct"] <= 75),
-        "q4_tables": sum(1 for t in tables if t["position_pct"] > 75),
-    }
-
-    last_500 = markdown.rstrip()[-500:]
-    appears_truncated = not any(
-        last_500.endswith(end) for end in ['.', '!', '?', '```', '---', '|', '\n\n']
-    )
-
-    domain_type = "unknown"
-    if url:
-        if any(tld in url for tld in [".gov", ".edu", ".mil"]):
-            domain_type = "authoritative"
-        elif any(tld in url for tld in [".org"]):
-            domain_type = "organization"
-        elif any(tld in url for tld in [".ac.", ".edu."]):
-            domain_type = "academic"
-        else:
-            domain_type = "commercial"
-
-    return {
-        "url": url,
-        "title": title,
-        "domain_type": domain_type,
-        "size": {
-            "total_chars": total_chars,
-            "total_lines": total_lines,
-            "total_words": total_words,
-        },
-        "structure": {
-            "heading_count": len(headings),
-            "heading_tree": headings[:15],  # top 15 for conciseness
-            "table_count": len(tables),
-            "tables": tables,
-            "code_block_count": len(code_blocks),
-            "code_blocks": code_blocks,
-            "bullet_list_items": bullet_list_items,
-            "numbered_list_items": numbered_list_items,
-            "external_link_count": len(external_links),
-            "image_count": len(images),
-        },
-        "noise": {
-            "nav_link_density_lines": nav_link_lines,
-            "nav_link_ratio": round(nav_link_lines / max(total_lines, 1), 3),
-            "cookie_banner_present": cookie_banner,
-            "boilerplate_pattern_count": boilerplate_hits,
-            "repeated_blocks": repeated_blocks[:5],
-        },
-        "content_density": content_density,
-        "completeness": {
-            "appears_truncated": appears_truncated,
-            "last_200_chars": markdown.rstrip()[-200:],
-        },
-    }
-
-
-def extract_spot_check_samples(markdown: str) -> dict:
-    """Extract 3 raw samples from different positions for formatting verification."""
-    if not markdown:
-        return {"beginning_sample": "", "middle_sample": "", "structural_sample": ""}
-    total = len(markdown)
-    if total < 500:
-        return {"beginning_sample": markdown, "middle_sample": markdown, "structural_sample": markdown}
-
-    first_heading_end = markdown.find("\n", markdown.find("#"))
-    start_sample = markdown[max(0, first_heading_end):first_heading_end + 500] if first_heading_end > 0 else markdown[:500]
-
-    mid = total // 2
-    mid_sample = markdown[mid - 250:mid + 250]
-
-    table_match = re.search(r'(\|.+\|[\s\S]{0,300})', markdown)
-    structural_sample = table_match.group(0)[:500] if table_match else markdown[3 * total // 4: 3 * total // 4 + 500]
-
-    return {
-        "beginning_sample": start_sample,
-        "middle_sample": mid_sample,
-        "structural_sample": structural_sample,
-    }
-
-
-def detect_result_overlap(profiles: list) -> dict:
-    """Detect when multiple search results contain the same information."""
-    all_claims = []
-    for p in profiles:
-        all_claims.extend(p.get("content", {}).get("key_claims", []))
-
-    if not all_claims:
-        return {"unique_claim_ratio": 0.0, "duplicated_claims": [], "result_diversity": "low"}
-
-    claim_counts = Counter(all_claims)
-    duplicated = [c for c, count in claim_counts.items() if count > 1]
-
-    unique_ratio = round(len(set(all_claims)) / len(all_claims), 3)
-    return {
-        "unique_claim_ratio": unique_ratio,
-        "duplicated_claims": duplicated[:10],
-        "result_diversity": "high" if len(duplicated) < 2 else "low" if len(duplicated) > 5 else "medium"
-    }
-
-
-def is_profile_viable(profile: dict) -> bool:
-    """Check if a profile has enough content to be worth judging."""
-    content = profile.get("content", {})
-    structure = profile.get("structure", {})
-
-    has_claims = len(content.get("key_claims", [])) > 0
-    has_sections = len(content.get("section_summaries", [])) > 0
-    is_error = content.get("content_completeness") in ("error_page", "navigation_only")
-    has_substance = structure.get("size", {}).get("total_words", 0) > 50
-
-    return (has_claims or has_sections) and not is_error and has_substance
-
+    return result
 
 def enforce_baseline_dimensions(rubric: Optional[EvalRubric]) -> EvalRubric:
-    """Ensure all 3 axes (Quality, Ranking, Fidelity) are represented in the rubric."""
     if not rubric or not rubric.dimensions:
         dims = [
-            BASELINE_DIMENSIONS["quality"],
-            BASELINE_DIMENSIONS["ranking"],
             BASELINE_DIMENSIONS["fidelity"],
+            BASELINE_DIMENSIONS["ranking"],
+            BASELINE_DIMENSIONS["coverage"],
+            BASELINE_DIMENSIONS["authority"],
+            BASELINE_DIMENSIONS["freshness"],
         ]
-        dims[0].weight = 0.4
-        dims[1].weight = 0.3
-        dims[2].weight = 0.3
+        # weights sum to 0.5; normalize to 1.0
+        for d in dims:
+            d.weight = d.weight * 2
         return EvalRubric(dimensions=dims, grading_notes="Default baseline rubric applied.")
 
-    existing_names_and_criteria = " ".join(
-        f"{d.name} {d.criteria}" for d in rubric.dimensions
-    ).lower()
-
+    existing_names = [d.name.lower() for d in rubric.dimensions]
+    
     missing_axes = []
-    for axis, keywords in [("quality", QUALITY_KEYWORDS), ("ranking", RANKING_KEYWORDS), ("fidelity", FIDELITY_KEYWORDS)]:
-        if not any(kw in existing_names_and_criteria for kw in keywords):
-            missing_axes.append(axis)
+    if not any("fidelity" in n or "scrape" in n for n in existing_names):
+        missing_axes.append("fidelity")
+    if not any("ranking" in n or "ordering" in n for n in existing_names):
+        missing_axes.append("ranking")
+    if not any("coverage" in n or "completeness" in n for n in existing_names):
+        missing_axes.append("coverage")
+    if not any("authority" in n or "credibility" in n for n in existing_names):
+        missing_axes.append("authority")
+    if not any("freshness" in n or "temporal" in n for n in existing_names):
+        missing_axes.append("freshness")
 
     if not missing_axes:
         return rubric
 
     new_dims = list(rubric.dimensions)
-    total_baseline_weight = len(missing_axes) * 0.15
+    total_baseline_weight = sum(BASELINE_DIMENSIONS[axis].weight for axis in missing_axes)
     scale_factor = (1.0 - total_baseline_weight) / 1.0
 
     for d in new_dims:
@@ -305,31 +179,29 @@ def enforce_baseline_dimensions(rubric: Optional[EvalRubric]) -> EvalRubric:
 
     return EvalRubric(dimensions=new_dims, grading_notes=rubric.grading_notes)
 
-
 def sanity_check(dimension_evals: List[DimensionEval]) -> List[str]:
     warnings = []
-    scores = [d.score for d in dimension_evals]
-    level_ranges = {
-        "L1": (0.0, 0.2), "L2": (0.2, 0.4), "L3": (0.4, 0.6),
-        "L4": (0.6, 0.8), "L5": (0.8, 1.0)
-    }
+    scores = [d.score for d in dimension_evals if not d.is_fallback]
+    
+    if any(d.is_fallback for d in dimension_evals):
+        warnings.append("WARNING: One or more dimensions used a fallback evaluation due to errors.")
 
     if len(scores) > 1 and len(set(round(s, 1) for s in scores)) == 1:
-        warnings.append(f"SUSPICIOUS: All {len(scores)} dimensions scored identically ({scores[0]:.2f})")
+        warnings.append(f"SUSPICIOUS: All {len(scores)} valid dimensions scored identically ({scores[0]:.2f})")
 
     if len(scores) > 1 and all(0.5 <= s <= 0.7 for s in scores):
         warnings.append("SUSPICIOUS: Score compression — all scores in 0.5-0.7 range, full scale unused")
 
     for d in dimension_evals:
+        if d.is_fallback:
+            continue
         if d.contrastive_fail_triggered and d.score > 0.4:
             warnings.append(
                 f"CONTRADICTION: '{d.dimension_name}' triggered contrastive_fail "
                 f"but scored {d.score:.2f} — expected <= 0.40 (L1 or L2)"
             )
-
-    for d in dimension_evals:
-        if d.assigned_level in level_ranges:
-            lo, hi = level_ranges[d.assigned_level]
+        if d.assigned_level in LEVEL_RANGES:
+            lo, hi = LEVEL_RANGES[d.assigned_level]
             if not (lo - 0.01 <= d.score <= hi + 0.01):
                 warnings.append(
                     f"MISMATCH: '{d.dimension_name}' assigned {d.assigned_level} "
@@ -338,14 +210,12 @@ def sanity_check(dimension_evals: List[DimensionEval]) -> List[str]:
 
     return warnings
 
-
 class Judge:
     def __init__(self, config: EvalConfig, or_pool: OpenRouterClientPool):
         self.config = config
         self.or_pool = or_pool
         self.judge_model = config.judge_model
-        self.extraction_model = getattr(config, "extraction_model", "") or config.judge_model
-        self._profile_cache: Dict[str, dict] = {}
+        self.p1_model = getattr(config, "p1_model", "") or config.judge_model
         self._judge_cache: Dict[str, EvalResult] = {}
 
     def _parse_json(self, clean_response: str) -> dict:
@@ -373,50 +243,140 @@ class Judge:
             except Exception:
                 pass
 
+        repaired = self._repair_truncated_json(clean_response)
+        if repaired:
+            logger.warning("[Judge] Recovered JSON via truncation repair.")
+            return repaired
+
         logger.error(f"[Judge] Failed to parse JSON from response. First 300 chars: {clean_response[:300]}")
         return {}
 
-    async def _extract_content_profile(self, url: str, title: str, full_markdown: str) -> dict:
+    def _repair_truncated_json(self, s: str) -> dict:
+        first_brace = s.find('{')
+        if first_brace == -1:
+            return {}
+        s = s[first_brace:]
+
+        depth_brace = 0
+        depth_bracket = 0
+        in_string = False
+        escape_next = False
+
+        for ch in s:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth_brace += 1
+            elif ch == '}':
+                depth_brace = max(0, depth_brace - 1)
+            elif ch == '[':
+                depth_bracket += 1
+            elif ch == ']':
+                depth_bracket = max(0, depth_bracket - 1)
+
+        if in_string:
+            s += '"'
+        s += ']' * depth_bracket + '}' * depth_brace
+
+        try:
+            return json.loads(s)
+        except Exception:
+            return {}
+
+    async def _run_p1_agent(self, sr: FirecrawlSearchResult, query: str, intent: str, domain_type: str) -> P1Result:
+        full_markdown = sr.full_markdown or sr.snippet or ""
+        word_count = len(full_markdown.split())
+        
+        fallback = P1Result(
+            rank=sr.firecrawl_rank,
+            url=sr.url,
+            domain_type=domain_type,
+            scrape_score=0.0,
+            scrape_level="L1",
+            scrape_issues=["P1 evaluation failed"],
+            scrape_reasoning="Failed to execute P1 agent.",
+            primary_topic=sr.title or "Unknown",
+            page_type="other",
+            authority_assessment="Unknown",
+            author_credentials="",
+            key_claims=[],
+            data_points=[],
+            named_entities={},
+            temporal_markers=[],
+            section_summaries=[],
+            table_contents=[],
+            content_completeness="error_page",
+            content_gaps=[],
+            word_count=word_count,
+            is_fallback=True,
+            fallback_reason="Exception or parsing error in P1 agent"
+        )
+        
         if not full_markdown:
-            return {
-                "primary_topic": "Empty document",
-                "page_type": "other",
-                "authority_signals": [],
-                "key_claims": [],
-                "data_points": [],
-                "named_entities": {},
-                "temporal_markers": [],
-                "section_summaries": [],
-                "table_contents": [],
-                "code_block_purposes": [],
-                "content_gaps_or_issues": ["No markdown scraped."],
-                "content_completeness": "error_page"
-            }
+            fallback.fallback_reason = "Empty document content"
+            return fallback
 
-        cache_key = hashlib.sha256(full_markdown.encode("utf-8")).hexdigest()
-        if cache_key in self._profile_cache:
-            return self._profile_cache[cache_key]
+        system_prompt = """You are a document analyst for a search evaluation pipeline. A user searched for a specific query.
+One of the scraped results has been given to you. Your job is to produce two things:
 
-        system_prompt = """You are a Document Intelligence Extractor. Read the document and produce a complete, structured JSON profile.
-RULES:
-1. Extract ONLY what is explicitly stated in the document. Do NOT infer or paraphrase beyond what is written.
-2. Do NOT evaluate quality, relevance, or usefulness.
-3. If a field has no applicable content, output an empty list [] or null.
-4. For key_claims: each claim must be a single self-contained factual statement that could be verified independently.
-5. Extract ALL significant factual claims. Do not cap arbitrarily.
-6. Output ONLY a JSON object matching the requested schema."""
+1. SCRAPE QUALITY VERDICT: An honest assessment of how faithfully this markdown preserves the
+   original page. Think: would someone reading this markdown get the same information as someone
+   reading the live page? Score 0.0–1.0 with a level (L1–L5) and count the structural elements
+   you observe (tables, headings, lists, code blocks, navigation links, boilerplate blocks).
 
-        user_prompt = f"""Document URL: {url}
-Document Title: {title}
+2. CONTENT INTELLIGENCE PROFILE: A factual evidence record of what this document contains — for
+   use by downstream judges who will cite your extraction verbatim. Be thorough on facts and
+   disciplined about what you claim to know. Extract only what is explicitly present in the text.
+   If a field has no evidence, return empty — never infer or fabricate.
+
+GUARDRAILS (non-obvious conventions, apply carefully):
+- temporal_markers: Extract only explicit, specific date references ("Q3 2026", "March 15 2026").
+  Never extract vague temporal language ("recently", "soon", "in the near future").
+- publication_date: The page's own stated publish/update date only. Do NOT infer from dates
+  mentioned in the body text or citations — those are temporal markers, not publication dates.
+- detected_language: If content is mixed-language, return "mixed" regardless of which language
+  dominates. Do not default to the majority language."""
+
+        user_prompt = f"""Document URL: {sr.url}
+Document Title: {sr.title}
+Query/Intent Context: '{query}' ({intent})
 
 FULL DOCUMENT CONTENT:
 {full_markdown}
 
-Extract a complete content profile. Output ONLY a JSON object matching this schema exactly:
+---
+CLASSIFICATION CONTEXT (reference only — your content reading takes precedence):
+Pre-classified domain type: {domain_type}
+
+Output ONLY a JSON object matching this schema exactly:
 {{
+  "scrape_score": <float 0.0-1.0>,
+  "scrape_level": "<L1|L2|L3|L4|L5>",
+  "scrape_issues": ["<specific issue 1>", "<specific issue 2>"],
+  "scrape_reasoning": "<1-2 sentences explaining score>",
+  "nav_link_ratio": <float 0.0-1.0>,
+  "boilerplate_pattern_count": <int 0-10>,
+  "table_count": <int>,
+  "heading_count": <int>,
+  "list_count": <int>,
+  "code_block_count": <int>,
   "primary_topic": "<one precise sentence describing what this page is about>",
   "page_type": "<one of: official_documentation | news_article | blog_post | academic_paper | government_page | product_page | forum_thread | reference_database | tutorial | legal_document | other>",
-  "authority_signals": ["<observable signal of authority or lack thereof>"],
+  "publication_date": "<YYYY-MM-DD or YYYY-MM or YYYY or ''>",
+  "query_relevance_score": <float 0.0-1.0>,
+  "detected_language": "<ISO 639-1 code or 'mixed'>",
+  "authority_assessment": "<narrative assessment of credibility>",
+  "authority_score": <float 0.0-1.0>,
+  "author_credentials": "<any professional credentials visible>",
   "key_claims": ["<atomic factual statement 1>", "<atomic factual statement 2>"],
   "data_points": ["<exact number/measurement/threshold as it appears>"],
   "named_entities": {{
@@ -426,218 +386,285 @@ Extract a complete content profile. Output ONLY a JSON object matching this sche
     "locations": [],
     "laws_standards_regulations": []
   }},
-  "temporal_markers": ["<dates, years, or temporal references found>"],
+  "temporal_markers": ["<dates, years, or explicit temporal references>"],
   "section_summaries": [
     {{"section_heading": "<heading text>", "key_point": "<summary sentence>"}}
   ],
   "table_contents": [
     {{"description": "<table purpose>", "key_data": "<most important row/data>"}}
   ],
-  "code_block_purposes": ["<purpose of code block>"],
-  "content_gaps_or_issues": ["<any observable issue or cut off content>"],
-  "content_completeness": "<one of: complete | appears_truncated | partial | navigation_only | error_page>"
+  "content_completeness": "<one of: complete | appears_truncated | partial | navigation_only | error_page>",
+  "content_gaps": ["<any observable gaps or missing sections>"]
 }}"""
 
         try:
             resp = await self.or_pool.generate(
                 prompt=user_prompt,
-                model=self.extraction_model,
+                model=self.p1_model,
                 temperature=0.0,
-                max_tokens=8192,
+                max_tokens=None,
                 system_prompt=system_prompt,
                 response_format={"type": "json_object"}
             )
-            parsed = self._parse_json(resp)
-            if parsed:
-                self._profile_cache[cache_key] = parsed
-                return parsed
+            data = self._parse_json(resp)
+            if data:
+                score = _clamp_score_to_level(data.get("scrape_level", "L3"), float(data.get("scrape_score", 0.5)))
+                res = P1Result(
+                    rank=sr.firecrawl_rank,
+                    url=sr.url,
+                    domain_type=domain_type,
+                    scrape_score=score,
+                    scrape_level=data.get("scrape_level", "L3"),
+                    scrape_issues=data.get("scrape_issues", []),
+                    scrape_reasoning=data.get("scrape_reasoning", ""),
+                    nav_link_ratio=float(data.get("nav_link_ratio", 0.0)),
+                    boilerplate_pattern_count=int(data.get("boilerplate_pattern_count", 0)),
+                    table_count=int(data.get("table_count", 0)),
+                    heading_count=int(data.get("heading_count", 0)),
+                    list_count=int(data.get("list_count", 0)),
+                    code_block_count=int(data.get("code_block_count", 0)),
+                    primary_topic=data.get("primary_topic", sr.title or "Unknown"),
+                    page_type=data.get("page_type", "other"),
+                    publication_date=data.get("publication_date", ""),
+                    query_relevance_score=float(data.get("query_relevance_score", 0.0)),
+                    detected_language=data.get("detected_language", "en"),
+                    authority_assessment=data.get("authority_assessment", "Unknown"),
+                    authority_score=float(data.get("authority_score", 0.0)),
+                    author_credentials=data.get("author_credentials", ""),
+                    key_claims=data.get("key_claims", []),
+                    data_points=data.get("data_points", []),
+                    named_entities=data.get("named_entities", {}),
+                    temporal_markers=data.get("temporal_markers", []),
+                    section_summaries=data.get("section_summaries", []),
+                    table_contents=data.get("table_contents", []),
+                    content_completeness=data.get("content_completeness", "partial"),
+                    content_gaps=data.get("content_gaps", []),
+                    word_count=word_count,
+                    is_fallback=False
+                )
+                return _validate_p1_consistency(res)
         except Exception as e:
-            logger.warning(f"[Judge] Profile extraction failed for {url}: {e}")
-
-        fallback = {
-            "primary_topic": title or "Unknown document",
-            "page_type": "other",
-            "authority_signals": [],
-            "key_claims": [],
-            "data_points": [],
-            "named_entities": {},
-            "temporal_markers": [],
-            "section_summaries": [],
-            "table_contents": [],
-            "code_block_purposes": [],
-            "content_gaps_or_issues": ["Profile extraction error fallback."],
-            "content_completeness": "partial"
-        }
-        self._profile_cache[cache_key] = fallback
+            logger.warning(f"[Judge] P1 Agent failed for {sr.url}: {e}")
+            fallback.fallback_reason = str(e)
+            
         return fallback
 
-    async def _build_document_profile(self, sr: FirecrawlSearchResult) -> dict:
-        md = sr.full_markdown or sr.snippet or ""
-        structure = extract_structure_profile(md, sr.url, sr.title)
-        spot_checks = extract_spot_check_samples(md)
-        content = await self._extract_content_profile(sr.url, sr.title, md)
-        return {
-            "rank": sr.firecrawl_rank,
-            "url": sr.url,
-            "title": sr.title,
-            "structure": structure,
-            "content": content,
-            "spot_check_samples": spot_checks
+    def _route_dimensions(self, rubric: EvalRubric) -> Dict[str, List[RubricDimension]]:
+        routes = {
+            "ranking": [],
+            "coverage": [],
+            "authority": [],
+            "freshness": [],
+            "precision": []
         }
+        
+        for dim in rubric.dimensions:
+            text = f"{dim.name} {dim.criteria}".lower()
+            if any(kw in text for kw in ["ranking", "ordering", "priority", "position", "result order", "rank"]):
+                routes["ranking"].append(dim)
+            elif any(kw in text for kw in ["authority", "credibility", "trustworthy", "source quality", "expert", "official", "credentials"]):
+                routes["authority"].append(dim)
+            elif any(kw in text for kw in ["temporal", "freshness", "recency", "current", "recent", "date", "latest", "updated", "real.time"]):
+                routes["freshness"].append(dim)
+            elif any(kw in text for kw in ["accuracy", "numerical", "factual", "precision", "statistics", "data", "measurement", "consistent"]):
+                routes["precision"].append(dim)
+            else:
+                routes["coverage"].append(dim)
+                
+        return routes
 
-    async def _evaluate_dimension(
-        self,
-        test_case: TestCase,
-        dimension: RubricDimension,
-        profiles: List[dict],
-        diversity_info: dict
-    ) -> DimensionEval:
-        viable_profiles = [p for p in profiles if is_profile_viable(p)]
-        if not viable_profiles:
+    def _aggregate_fidelity(self, p1_results: List[P1Result], rubric: EvalRubric) -> Optional[DimensionEval]:
+        fid_dim = next((d for d in rubric.dimensions if d.name == "_baseline_fidelity" or "fidelity" in d.name.lower() or "scrape" in d.name.lower()), None)
+        if not fid_dim:
+            return None
+            
+        if not p1_results:
             return DimensionEval(
-                dimension_name=dimension.name,
-                weight=dimension.weight,
-                evidence_found=["No viable document profiles found — all pages empty or error pages."],
-                criteria_checklist=[CriteriaCheck(condition=dimension.criteria, status="NOT_MET", evidence="No content scraped.")],
+                dimension_name=fid_dim.name,
+                weight=fid_dim.weight,
+                evidence_found=["No results to evaluate"],
+                criteria_checklist=[CriteriaCheck(condition=fid_dim.criteria, status="NOT_MET", evidence="Empty results")],
                 contrastive_fail_triggered=True,
-                contrastive_fail_explanation="All scraped pages were empty or unviable.",
+                contrastive_fail_explanation="No results provided",
                 assigned_level="L1",
-                level_justification="L1 because zero viable content was retrieved.",
-                score=0.1,
-                reasoning="Failed because no viable content was scraped across any result."
+                level_justification="No content",
+                score=0.0,
+                reasoning="No results scraped"
             )
+            
+        avg_score = sum(p.scrape_score for p in p1_results) / len(p1_results)
+        
+        assigned_level = "L1"
+        for lvl, (lo, hi) in LEVEL_RANGES.items():
+            if lo <= avg_score <= hi:
+                assigned_level = lvl
+                break
+                
+        evidence_found = []
+        for p in p1_results:
+            if p.is_fallback:
+                evidence_found.append(f"Rank {p.rank}: {p.url} — P1 evaluation failed ({p.fallback_reason})")
+            else:
+                evidence_found.append(f"Rank {p.rank}: {p.url} — scrape_score={p.scrape_score:.2f}, issues={p.scrape_issues}")
+                
+        return DimensionEval(
+            dimension_name=fid_dim.name,
+            weight=fid_dim.weight,
+            evidence_found=evidence_found,
+            criteria_checklist=[CriteriaCheck(condition=fid_dim.criteria, status="PARTIALLY_MET" if avg_score > 0.4 else "NOT_MET", evidence="Aggregated from P1 agents")],
+            contrastive_fail_triggered=(avg_score < 0.4),
+            contrastive_fail_explanation="Average scrape quality is poor" if avg_score < 0.4 else "",
+            assigned_level=assigned_level,
+            level_justification=f"Computed average score is {avg_score:.2f}",
+            score=avg_score,
+            reasoning=f"Aggregated fidelity score from {len(p1_results)} pages."
+        )
 
-        system_prompt = """You are a SEARCH & SCRAPE EVALUATION JUDGE. You evaluate one specific rubric dimension at a time.
-YOUR RULES:
-1. Base every statement on evidence from the Document Profiles.
-2. Follow all 5 steps IN ORDER before outputting the final JSON.
-3. Assign a level (L1-L5) before picking a score. The score MUST fall within the level's range.
-4. The Contrastive Fail Check is MANDATORY. If contrastive_fail triggers, level CANNOT be L4 or L5.
-5. You MUST justify why you chose your level and not adjacent ones.
-6. Output ONLY a valid JSON object."""
+    async def _run_p2_judge(self, judge_type: str, p1_results: List[P1Result], test_case: TestCase, dims: List[RubricDimension]) -> List[DimensionEval]:
+        if not dims:
+            return []
+            
+        system_prompt = f"""You are a specialized search result evaluator focused on {judge_type.upper()} quality.
 
-        is_ranking_dim = any(kw in dimension.name.lower() for kw in RANKING_KEYWORDS)
+You have been given verified content profiles for each retrieved document (extracted by a P1 agent),
+and a set of rubric dimensions that define what "good" looks like for this specific query.
 
-        profiles_context = json.dumps(profiles, indent=2)
-        if is_ranking_dim:
-            ranking_table = "RESULTS IN FIRECRAWL'S ORIGINAL ORDER (evaluate optimal ordering):\n"
-            for p in sorted(profiles, key=lambda x: x.get("rank", 99)):
-                c = p.get("content", {})
-                s = p.get("structure", {})
-                ranking_table += f"[RANK {p.get('rank', '-')}] {p.get('url', 'N/A')}\n"
-                ranking_table += f"  Domain type:       {p.get('domain_type', 'unknown')}\n"
-                ranking_table += f"  Page type:         {c.get('page_type', 'other')}\n"
-                ranking_table += f"  Authority signals: {c.get('authority_signals', [])}\n"
-                ranking_table += f"  Claims extracted:  {len(c.get('key_claims', []))}\n"
-                ranking_table += f"  Data points:       {len(c.get('data_points', []))}\n"
-                ranking_table += f"  Tables:            {s.get('table_count', 0)}\n"
-                ranking_table += f"  Noise ratio:       {s.get('noise', {}).get('nav_link_ratio', 0.0)}\n"
-                ranking_table += f"  Completeness:      {c.get('content_completeness', 'unknown')}\n"
-                ranking_table += f"  Primary topic:     {c.get('primary_topic', '')}\n\n"
-            profiles_context = ranking_table + "\nDETAILED DOCUMENT PROFILES:\n" + profiles_context
+Your task: make calibrated, evidence-based judgments on each dimension. For each one, decide
+whether the retrieved documents collectively satisfy it, partially satisfy it, or fail it — then
+express that as a precise score and level. Cite the specific evidence from the profiles that
+drove your decision.
 
-        difficulty_context = f"""DIFFICULTY CONTEXT:
-  Difficulty: {test_case.difficulty} | Chaos Archetype: {getattr(test_case, 'chaos_archetype', 'none')}
-  - For hard queries: L3 (Partial) may represent genuinely good system performance.
-  - Calibrate expectations but do NOT inflate scores."""
+The scoring levels (L1–L5) are ranges, not labels. Choose the level that best describes the
+quality, then pick the most precise score within that range. If the contrastive_fail description
+matches what you observe, the result cannot score in L4 or L5 — but make that determination
+from reading the evidence, not as a rule to follow mechanically.
+
+A key signal in each profile: query_relevance_score. A document scoring < 0.3 was assessed
+by the P1 agent as largely irrelevant to the query — weight evidence from such documents
+accordingly when judging coverage and precision dimensions.
+
+Output ONLY a valid JSON object in the format below."""
+
+        import dataclasses
+        profiles_json = json.dumps([dataclasses.asdict(p) for p in p1_results], indent=2)
+        dims_json = json.dumps([{"name": d.name, "weight": d.weight, "criteria": d.criteria, "contrastive_fail": d.contrastive_fail} for d in dims], indent=2)
 
         user_prompt = f"""EVALUATION CONTEXT
 Query:           {test_case.query}
 Intent:          {test_case.intent}
 Difficulty:      {test_case.difficulty}
-Result Diversity: {diversity_info.get('result_diversity')} ({diversity_info.get('unique_claim_ratio')} unique claim ratio)
 
-DIMENSION TO EVALUATE:
-  Name:             {dimension.name}
-  Weight in Rubric: {dimension.weight}
-  Criteria:
-    {dimension.criteria}
-  Contrastive Fail (calibration anchor):
-    {dimension.contrastive_fail}
+DIMENSIONS TO EVALUATE:
+{dims_json}
 
 GRADING NOTES FROM TEST AUTHOR:
   {getattr(test_case.rubric, 'grading_notes', '') if test_case.rubric else ''}
 
-{difficulty_context}
-
-DOCUMENT PROFILES:
-{profiles_context}
+DOCUMENT PROFILES (from P1 Agents):
+{profiles_json}
 
 SCORING LEVELS:
-  L1 [0.00–0.20] CRITICAL FAILURE  -> Criteria almost entirely unmet. contrastive_fail matches.
-  L2 [0.20–0.40] MAJOR DEFICIENCY  -> Some relevance, but core requirement unmet.
-  L3 [0.40–0.60] PARTIAL           -> Most important condition met, but notable gaps.
-  L4 [0.60–0.80] ADEQUATE          -> Mostly met, minor gaps. contrastive_fail does NOT match.
-  L5 [0.80–1.00] EXCELLENT         -> Fully or near-fully met. Strong evidence.
+  L1 [0.00–0.20] CRITICAL FAILURE
+  L2 [0.20–0.40] MAJOR DEFICIENCY
+  L3 [0.40–0.60] PARTIAL
+  L4 [0.60–0.80] ADEQUATE
+  L5 [0.80–1.00] EXCELLENT
 
-EXECUTE THESE 5 STEPS AND OUTPUT JSON:
+OUTPUT FORMAT:
 {{
-  "step1_evidence_found": ["<exact quote or structural fact from profiles>"],
-  "step2_criteria_checklist": [
-    {{"condition": "<condition text>", "status": "MET|PARTIALLY_MET|NOT_MET", "evidence": "<supporting quote>"}}
-  ],
-  "step3_contrastive_fail_triggered": true,
-  "step3_contrastive_fail_explanation": "<specific explanation citing evidence>",
-  "step4_assigned_level": "L1|L2|L3|L4|L5",
-  "step4_level_justification": "<why this level AND NOT adjacent level(s)>",
-  "step5_score": 0.75,
-  "summary_reasoning": "<1-2 sentence plain-English summary of decision>"
+  "evaluations": [
+    {{
+      "dimension_name": "<name>",
+      "step1_evidence_found": ["<quote>"],
+      "step2_criteria_checklist": [
+        {{"condition": "<condition text>", "status": "MET|PARTIALLY_MET|NOT_MET", "evidence": "<supporting quote>"}}
+      ],
+      "step3_contrastive_fail_triggered": true|false,
+      "step3_contrastive_fail_explanation": "<explanation>",
+      "step4_assigned_level": "L1|L2|L3|L4|L5",
+      "step4_level_justification": "<justification>",
+      "step5_score": 0.75,
+      "summary_reasoning": "<summary>"
+    }}
+  ]
 }}"""
 
+        results = []
         try:
             resp = await self.or_pool.generate(
                 prompt=user_prompt,
                 model=self.judge_model,
                 temperature=0.0,
-                max_tokens=3500,
+                max_tokens=None,
                 system_prompt=system_prompt,
                 response_format={"type": "json_object"}
             )
             data = self._parse_json(resp)
-            if data and "step5_score" in data:
-                level = data.get("step4_assigned_level", "L3")
-                score = float(data.get("step5_score", 0.5))
-                # Ensure score is within range [0.0, 1.0]
-                score = max(0.0, min(1.0, score))
+            evals = data.get("evaluations", [])
+            for e in evals:
+                dim_name = e.get("dimension_name")
+                dim = next((d for d in dims if d.name == dim_name), None)
+                if not dim:
+                    continue
+                level = e.get("step4_assigned_level", "L3")
+                score = _clamp_score_to_level(level, float(e.get("step5_score", 0.5)))
+                
                 checks = [
                     CriteriaCheck(
                         condition=c.get("condition", ""),
                         status=c.get("status", "PARTIALLY_MET"),
                         evidence=c.get("evidence", "")
                     )
-                    for c in data.get("step2_criteria_checklist", [])
+                    for c in e.get("step2_criteria_checklist", [])
                 ]
-                return DimensionEval(
-                    dimension_name=dimension.name,
-                    weight=dimension.weight,
-                    evidence_found=data.get("step1_evidence_found", []),
+                
+                results.append(DimensionEval(
+                    dimension_name=dim.name,
+                    weight=dim.weight,
+                    evidence_found=e.get("step1_evidence_found", []),
                     criteria_checklist=checks,
-                    contrastive_fail_triggered=bool(data.get("step3_contrastive_fail_triggered", False)),
-                    contrastive_fail_explanation=data.get("step3_contrastive_fail_explanation", ""),
+                    contrastive_fail_triggered=bool(e.get("step3_contrastive_fail_triggered", False)),
+                    contrastive_fail_explanation=e.get("step3_contrastive_fail_explanation", ""),
                     assigned_level=level,
-                    level_justification=data.get("step4_level_justification", ""),
+                    level_justification=e.get("step4_level_justification", ""),
                     score=score,
-                    reasoning=data.get("summary_reasoning", f"Scored {score:.2f} on {dimension.name}")
-                )
-        except Exception as e:
-            logger.warning(f"[Judge] Dimension evaluation failed for {dimension.name}: {e}")
+                    reasoning=e.get("summary_reasoning", "")
+                ))
+        except Exception as ex:
+            logger.warning(f"[Judge] {judge_type} evaluation failed: {ex}")
+            for dim in dims:
+                results.append(DimensionEval(
+                    dimension_name=dim.name,
+                    weight=dim.weight,
+                    evidence_found=["P2 Judge failure"],
+                    criteria_checklist=[],
+                    contrastive_fail_triggered=False,
+                    contrastive_fail_explanation="",
+                    assigned_level="L1",
+                    level_justification="Error",
+                    score=0.0,
+                    reasoning=f"Error in P2 judge: {ex}",
+                    is_fallback=True
+                ))
+        return results
 
-        # Fallback evaluation
-        return DimensionEval(
-            dimension_name=dimension.name,
-            weight=dimension.weight,
-            evidence_found=["Fallback evaluation used due to LLM parsing/generation error."],
-            criteria_checklist=[CriteriaCheck(condition=dimension.criteria, status="PARTIALLY_MET", evidence="Fallback")],
-            contrastive_fail_triggered=False,
-            contrastive_fail_explanation="Fallback triggered.",
-            assigned_level="L3",
-            level_justification="Fallback default L3.",
-            score=0.5,
-            reasoning=f"Default score assigned for {dimension.name} due to evaluation error."
-        )
+    async def _run_p2_ranking(self, p1_results, test_case, dims):
+        return await self._run_p2_judge("Ranking", p1_results, test_case, dims)
+
+    async def _run_p2_coverage(self, p1_results, test_case, dims):
+        return await self._run_p2_judge("Coverage", p1_results, test_case, dims)
+
+    async def _run_p2_authority(self, p1_results, test_case, dims):
+        return await self._run_p2_judge("Authority", p1_results, test_case, dims)
+
+    async def _run_p2_freshness(self, p1_results, test_case, dims):
+        return await self._run_p2_judge("Freshness", p1_results, test_case, dims)
+
+    async def _run_p2_precision(self, p1_results, test_case, dims):
+        return await self._run_p2_judge("Precision", p1_results, test_case, dims)
 
     async def evaluate(self, test_case: TestCase, search_results: list[FirecrawlSearchResult]) -> EvalResult:
-        logger.info(f"Evaluating tc: {test_case.id} with Extract-then-Evaluate two-phase Judge...")
+        logger.info(f"Evaluating tc: {test_case.id} with P1/P2 Multi-Agent Architecture...")
 
         rubric_str = str([(d.name, d.weight) for d in test_case.rubric.dimensions]) if getattr(test_case, "rubric", None) else ""
         content_str = "|".join(sorted([hashlib.sha256((r.full_markdown or "").encode()).hexdigest()[:16] for r in search_results]))
@@ -647,34 +674,54 @@ EXECUTE THESE 5 STEPS AND OUTPUT JSON:
             logger.info(f"[Judge] Cache hit for {test_case.id}")
             return self._judge_cache[cache_key]
 
-        # Phase 1: Build Document Profiles in parallel across URLs
-        profiles = await asyncio.gather(*(self._build_document_profile(sr) for sr in search_results))
-        diversity_info = detect_result_overlap(profiles)
+        domain_types = {sr.url: _classify_domain_type(sr.url) for sr in search_results}
 
-        # Enforce baseline dimensions on rubric
-        rubric = enforce_baseline_dimensions(getattr(test_case, "rubric", None))
-
-        # Phase 2: Evaluate each Rubric Dimension in parallel
-        dim_evals = await asyncio.gather(*(
-            self._evaluate_dimension(test_case, dim, profiles, diversity_info)
-            for dim in rubric.dimensions
+        p1_results = await asyncio.gather(*(
+            self._run_p1_agent(sr, test_case.query, test_case.intent, domain_types[sr.url])
+            for sr in search_results
         ))
 
-        # Phase 3: Aggregation using rubric weights
-        total_score = sum(de.weight * de.score for de in dim_evals)
-        total_score = round(max(0.0, min(1.0, total_score)), 4)
+        rubric = enforce_baseline_dimensions(getattr(test_case, "rubric", None))
 
-        warnings = sanity_check(dim_evals)
+        dim_routes = self._route_dimensions(rubric)
+
+        p2_coros = {}
+        if dim_routes["ranking"]:
+            p2_coros["ranking"] = self._run_p2_ranking(p1_results, test_case, dim_routes["ranking"])
+        if dim_routes["coverage"]:
+            p2_coros["coverage"] = self._run_p2_coverage(p1_results, test_case, dim_routes["coverage"])
+        if dim_routes["authority"]:
+            p2_coros["authority"] = self._run_p2_authority(p1_results, test_case, dim_routes["authority"])
+        if dim_routes["freshness"]:
+            p2_coros["freshness"] = self._run_p2_freshness(p1_results, test_case, dim_routes["freshness"])
+        if dim_routes["precision"]:
+            p2_coros["precision"] = self._run_p2_precision(p1_results, test_case, dim_routes["precision"])
+
+        p2_results = await asyncio.gather(*p2_coros.values())
+        all_evals = [eval_res for result_list in p2_results for eval_res in result_list]
+
+        fidelity_eval = self._aggregate_fidelity(p1_results, rubric)
+        if fidelity_eval:
+            all_evals.append(fidelity_eval)
+
+        for de in all_evals:
+            if not de.is_fallback:
+                de.score = _clamp_score_to_level(de.assigned_level, de.score)
+
+        total_score = round(sum(de.weight * de.score for de in all_evals), 4)
+
+        warnings = sanity_check(all_evals)
         for w in warnings:
             logger.warning(f"[Judge] TC {test_case.id} — {w}")
 
+        import dataclasses
         result = EvalResult(
             test_case_id=test_case.id,
-            dimension_evals=list(dim_evals),
+            dimension_evals=all_evals,
             overall_score=total_score,
-            document_profiles=list(profiles),
+            document_profiles=[dataclasses.asdict(p) for p in p1_results],
             warnings=warnings,
-            result_diversity=diversity_info
+            result_diversity={}
         )
 
         self._judge_cache[cache_key] = result

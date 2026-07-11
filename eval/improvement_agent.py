@@ -158,8 +158,8 @@ class ImprovementAgent:
             for de in getattr(res, 'dimension_evals', []):
                 for check in de.criteria_checklist:
                     if check.status == "NOT_MET":
-                        cond_short = check.condition[:60]
-                        coverage_misses_counts[cond_short] = coverage_misses_counts.get(cond_short, 0) + 1
+                        cond = check.condition
+                        coverage_misses_counts[cond] = coverage_misses_counts.get(cond, 0) + 1
 
         # Best 3 TCs
         sorted_results = sorted(eval_results, key=lambda x: x.overall_score)
@@ -178,9 +178,11 @@ class ImprovementAgent:
             tc = tc_dict[res.test_case_id]
             worst_url = ""
             worst_sq_issues = []
+            worst_p_dict = None
             if getattr(res, 'document_profiles', None):
-                worst_p = min(res.document_profiles, key=lambda p: p.get("structure", {}).get("size", {}).get("total_words", 0))
+                worst_p = min(res.document_profiles, key=lambda p: p.get("scrape_score", 1.0))
                 worst_url = worst_p.get("url", "")
+                worst_p_dict = worst_p
             for de in getattr(res, 'dimension_evals', []):
                 if any(kw in de.dimension_name.lower() for kw in ["fidelity", "scrape", "structure"]):
                     worst_sq_issues.extend([f"NOT_MET: {c.condition}" for c in de.criteria_checklist if c.status == "NOT_MET"])
@@ -191,14 +193,15 @@ class ImprovementAgent:
                 "category": tc.category,
                 "intent": tc.intent,
                 "overall_score": res.overall_score,
-                "coverage_score": res.coverage_score,
-                "ranking_score": res.ranking_score,
+                "coverage_score": getattr(res, 'coverage_score', res.overall_score),
+                "ranking_score": getattr(res, 'ranking_score', res.overall_score),
                 "dimensions": [
                     {"name": de.dimension_name, "score": de.score, "level": de.assigned_level}
                     for de in getattr(res, 'dimension_evals', [])
                 ],
                 "worst_scrape_url": worst_url,
-                "worst_scrape_issues": worst_sq_issues
+                "worst_scrape_issues": worst_sq_issues,
+                "worst_scrape_profile": worst_p_dict
             })
 
         # Category breakdown
@@ -223,7 +226,7 @@ class ImprovementAgent:
                         issue_type = f"{de.dimension_name}_NOT_MET"
                         issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
             for p in getattr(res, 'document_profiles', []):
-                for gap in p.get("content", {}).get("content_gaps_or_issues", []):
+                for gap in p.get("content_gaps", []):
                     issue_counts["Document_Gap"] = issue_counts.get("Document_Gap", 0) + 1
 
         avg_overall = sum(r.overall_score for r in eval_results) / max(1, len(eval_results))
@@ -346,7 +349,7 @@ Output JSON schema:
                 temperature=0.2,
                 response_format=use_response_format,
                 system_prompt=system_prompt,
-                max_tokens=24000,
+                max_tokens=None,
                 providers=self.providers
             )
             
@@ -359,8 +362,7 @@ Output JSON schema:
             if len(clean_response) < 200:
                 logger.warning(f"Improvement agent output was suspiciously short ({len(clean_response)} chars). Likely truncated due to thinking budget.")
                 return ImprovementAnalysis(
-                    root_cause_summary="Analysis truncated by token limit.",
-                    macro_patterns=[], micro_patterns=[], quick_wins=[], cross_dimension_patterns=[]
+                    root_causes=[RootCause(id="rc_err", dimension="system", title="Analysis Truncated", evidence=[], affected_tcs=[], severity="high", frequency="N/A", confidence="high")],
                 )
             else:
                 start = min([i for i in (clean_response.find('{'), clean_response.find('[')) if i != -1] or [-1])
@@ -525,7 +527,7 @@ Output JSON schema:
                     "rank": r.firecrawl_rank,
                     "url": r.url,
                     "title": r.title,
-                    "snippet": (r.snippet or "")[:300],
+                    "snippet": r.snippet or "",
                     "query_cache_status": getattr(r, "query_cache_status", ""),
                     "scrape_cache_status": getattr(r, "scrape_cache_status", ""),
                     "content_drift": getattr(r, "content_drift", None),
@@ -537,13 +539,6 @@ Output JSON schema:
             "warnings": getattr(eval_result, 'warnings', [])
         }
         
-        # Clean up repeated blocks to save tokens
-        for dp in prompt_data["document_profiles"]:
-            if "structure" in dp and "noise" in dp["structure"] and "repeated_blocks" in dp["structure"]["noise"]:
-                dp["structure"]["noise"]["repeated_blocks"] = dp["structure"]["noise"]["repeated_blocks"][:3]
-            if "completeness" in dp and "last_200_chars" in dp["completeness"]:
-                del dp["completeness"]["last_200_chars"]
-        
         prompt = f"{prompt_header}{json.dumps(prompt_data, indent=2)}"
         
         use_response_format = None if "glm" in self.model.lower() else {"type": "json_object"}
@@ -554,7 +549,7 @@ Output JSON schema:
                 temperature=0.3,
                 response_format=use_response_format,
                 system_prompt=system_prompt,
-                max_tokens=16000,
+                max_tokens=None,
                 providers=self.providers
             )
             

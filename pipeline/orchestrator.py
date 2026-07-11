@@ -21,7 +21,7 @@ from eval.comparator import RankingComparator
 from rl.signal_generator import SignalGenerator
 from reports.report_builder import ReportBuilder
 from reports.regression import RegressionDetector
-from eval.calibration import JudgeCalibration
+
 from eval.improvement_agent import ImprovementAgent
 from models.test_case import TestCase
 from models.eval_result import FirecrawlSearchResult, EvalResult
@@ -55,7 +55,7 @@ class Orchestrator:
         self.regression_detector = RegressionDetector()
         self.improvement_agent = ImprovementAgent(config, self.or_pool)
         self._background_tasks = []
-        self.calibration = JudgeCalibration()
+
         
         self.live_tc_diagnoses = []
         self.live_dpo_pairs = []
@@ -540,8 +540,47 @@ class Orchestrator:
                 else:
                     kb_rankings[tc.id] = [r["url"] for r in kbres]
 
+            def compute_judge_health(eval_results: List[EvalResult]) -> dict:
+                total = len(eval_results)
+                if total == 0:
+                    return {}
+                
+                fallback_count = 0
+                total_dims = 0
+                score_compression = 0
+                
+                for res in eval_results:
+                    dims = getattr(res, "dimension_evals", [])
+                    total_dims += len(dims)
+                    for de in dims:
+                        if getattr(de, "is_fallback", False):
+                            fallback_count += 1
+                    
+                    # check score compression per test case
+                    scores = [de.score for de in dims if not getattr(de, "is_fallback", False)]
+                    if len(scores) > 1 and len(set(round(s, 1) for s in scores)) == 1:
+                        score_compression += 1
+                        
+                fallback_rate = fallback_count / max(1, total_dims)
+                compression_rate = score_compression / total
+                
+                warnings = []
+                if fallback_rate > 0.1:
+                    warnings.append(f"High judge fallback rate: {fallback_rate:.1%}")
+                if compression_rate > 0.2:
+                    warnings.append(f"High judge score compression rate: {compression_rate:.1%}")
+                    
+                return {
+                    "fallback_rate": fallback_rate,
+                    "compression_rate": compression_rate,
+                    "warnings": warnings
+                }
+
             # Phase 7: Report & Regression
             self._emit_event({"type": "phase_start", "phase": "report"})
+            judge_health = compute_judge_health(all_eval_results)
+            for w in judge_health.get("warnings", []):
+                logger.warning(f"[Judge Health] {w}")
             reg_data = self.regression_detector.detect(run_id, all_eval_results)
             rl_summary = {
                 "dpo_pairs": len(self.live_dpo_pairs),

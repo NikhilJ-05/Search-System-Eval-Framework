@@ -22,7 +22,12 @@ class OpenRouterClient:
                 "HTTP-Referer": "https://firecrawl.eval",
                 "X-Title": "Firecrawl Eval",
             },
-            timeout=300.0,
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=1800.0,
+                write=60.0,
+                pool=30.0
+            ),
             limits=limits,
         )
 

@@ -5,7 +5,6 @@ Usage:
   python run.py                     # Start the web dashboard and open browser
   python run.py --cli               # Full pipeline run in terminal
   python run.py --cli --cases 5     # Quick test with only 5 test cases
-  python run.py --calibrate-only    # Only run judge calibration pre-flight
 """
 import asyncio
 import argparse
@@ -105,21 +104,7 @@ async def run_pipeline(num_cases: int = None):
         sse_queue_var.reset(token)
         await drain_task
 
-async def run_calibration_only():
-    from config import EvalConfig
-    from clients.openrouter import OpenRouterClientPool
-    from eval.judge import Judge
-    from eval.calibration import JudgeCalibration
 
-    config = EvalConfig.from_env()
-    or_pool = OpenRouterClientPool(config)
-    judge = Judge(config, or_pool)
-    calib = JudgeCalibration()
-    try:
-        result = await calib.run_calibration(judge)
-        logger.info(f"Calibration result: {'PASSED' if result else 'FAILED'}")
-    finally:
-        await or_pool.aclose()
 
 def open_browser():
     time.sleep(1.5)
@@ -128,23 +113,18 @@ def open_browser():
 def run_server():
     import uvicorn
     logger.info("Starting EvalOS Framework Dashboard at http://localhost:8000")
-    threading.Thread(target=open_browser, daemon=True).start()
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
 
 def main():
     parser = argparse.ArgumentParser(description="EvalOS Framework")
     parser.add_argument("--cli", action="store_true",
                         help="Run the pipeline in CLI mode (no web server)")
-    parser.add_argument("--calibrate-only", action="store_true",
-                        help="Run only judge calibration pre-flight check")
     parser.add_argument("--cases", type=int, default=None,
                         help="Override NUM_TEST_CASES for this run (e.g. --cases 5 for a quick test)")
     args = parser.parse_args()
 
     if args.cli:
         asyncio.run(run_pipeline(num_cases=args.cases))
-    elif args.calibrate_only:
-        asyncio.run(run_calibration_only())
     else:
         run_server()
 

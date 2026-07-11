@@ -95,9 +95,22 @@ class TestGenerator:
         self.model = config.generator_model
         self._semaphore = asyncio.Semaphore(8)
 
+    def _validate_rubric_claims(self, rubric: dict, query: str) -> List[str]:
+        warnings = []
+        query_lower = query.lower()
+        for d in rubric.get("dimensions", []):
+            criteria = d.get("criteria", "").lower()
+            import re
+            numbers = re.findall(r'\b(20\d{2}|\d{4,})\b', criteria)
+            for num in numbers:
+                if num not in query_lower:
+                    warnings.append(f"Dimension '{d.get('name')}' criteria contains specific number '{num}' not in query.")
+        return warnings
+
     def _validate_test_case(self, tc_data: dict) -> Tuple[bool, List[str]]:
         warnings = []
-        if len(tc_data.get("query", "").split()) < 4:
+        query = tc_data.get("query", "")
+        if len(query.split()) < 4:
             return False, ["Query too short (< 4 words)"]
         
         if tc_data.get("intent") not in VALID_INTENTS:
@@ -129,6 +142,10 @@ class TestGenerator:
         total_weight = sum(float(d.get("weight", 0.0)) for d in dimensions)
         if abs(total_weight - 1.0) > 0.05:
             return False, [f"Rubric dimension weights must sum to approximately 1.0 (got {total_weight})"]
+
+        claim_warnings = self._validate_rubric_claims(rubric, query)
+        if claim_warnings:
+            return False, claim_warnings
             
         return True, warnings
 
@@ -159,7 +176,7 @@ RUBRIC SCHEMA INSTRUCTIONS:
 - Each dimension must have:
   1. `name`: unique identifier (e.g., "coverage", "source_authority", "structural_fidelity").
   2. `weight`: numeric score weight.
-  3. `criteria`: explicit instructions on what the scraped/retrieved content must satisfy.
+  3. `criteria`: explicit instructions on what the scraped/retrieved content must satisfy. DO NOT include specific facts, numbers, or entities in the criteria unless they are explicitly part of the query.
   4. `contrastive_fail`: a concrete description/example of a failure mode for this dimension to calibrate the judge.
 - `grading_notes`: general guidance for the judge on how to evaluate the overall response, handle edge cases, or prioritize content.
 
@@ -211,7 +228,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                         model=self.model,
                         temperature=0.8,
                         system_prompt=system_prompt,
-                        max_tokens=4000,
+                        max_tokens=None,
                         providers=self.config.generator_providers
                     )
                     
@@ -327,7 +344,7 @@ TARGET CACHE RELATIONSHIPS:
 
 RUBRIC REQUIREMENTS:
 - 2 to 4 dimensions, weights must sum to exactly 1.0.
-- Each dimension needs: name, weight (float), criteria (what success looks like), contrastive_fail (what failure looks like).
+- Each dimension needs: name, weight (float), criteria (what success looks like), contrastive_fail (what failure looks like). DO NOT include specific facts, numbers, or entities in the criteria unless they are explicitly part of the query.
 
 OUTPUT SCHEMA:
 Your entire response must be a single, valid JSON object. Start with '{{' and end with '}}'. No markdown, no commentary.
@@ -371,7 +388,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                     model=self.model,
                     temperature=0.7,
                     system_prompt=system_prompt,
-                    max_tokens=4000,
+                    max_tokens=None,
                     providers=self.config.generator_providers
                 )
                 

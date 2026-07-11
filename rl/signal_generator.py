@@ -93,19 +93,25 @@ class SignalGenerator:
             if getattr(eval_result, "document_profiles", None):
                 for p in eval_result.document_profiles:
                     if p.get("url") == sr.url:
-                        comp_str = p.get("content", {}).get("content_completeness", "unknown")
+                        comp_str = p.get("content_completeness", "unknown")
                         if comp_str == "complete": completeness = 1.0
                         elif comp_str == "partial": completeness = 0.7
                         elif comp_str == "appears_truncated": completeness = 0.4
                         elif comp_str == "navigation_only": completeness = 0.1
                         elif comp_str == "error_page": completeness = 0.0
                         
-                        dom_type = p.get("structure", {}).get("domain_type", p.get("domain_type", "unknown"))
-                        auth_sigs = p.get("content", {}).get("authority_signals", [])
-                        if dom_type in ["authoritative", "academic"]:
-                            authority = 1.0
-                        elif auth_sigs:
-                            authority = 0.5
+                        dom_type = p.get("domain_type", "unknown")
+                        authority = p.get("authority_score", 0.0)
+                        if authority == 0.0:  # fallback if old profile or unpopulated
+                            auth_str = p.get("authority_assessment", "")
+                            if dom_type in ["authoritative", "academic"]:
+                                authority = 1.0
+                            elif dom_type == "organization" and auth_str:
+                                authority = 0.7
+                            elif len(auth_str) > 20:
+                                authority = 0.4
+                                
+                        relevance = p.get("query_relevance_score", eval_result.overall_score)
 
             composite = (
                 0.30 * relevance
@@ -239,9 +245,11 @@ class SignalGenerator:
             def _extract_state(state):
                 return {
                     "url": state.get("url"),
-                    "page_type": state.get("structure", {}).get("page_type"),
-                    "domain_type": state.get("structure", {}).get("domain_type"),
-                    "snippet": state.get("content", {}).get("summary", "")[:200]
+                    "page_type": state.get("page_type"),
+                    "domain_type": state.get("domain_type"),
+                    "snippet": state.get("primary_topic", "")[:200],
+                    "scrape_score": state.get("scrape_score", 0.0),
+                    "content_completeness": state.get("content_completeness", "unknown")
                 }
             
             pairs.append(ContrastiveFailPair(
@@ -269,21 +277,19 @@ class SignalGenerator:
             url = p.get("url")
             if not url: continue
             
-            struct = p.get("structure", {})
-            noise = struct.get("noise", {})
-            size = struct.get("size", {})
-            content = p.get("content", {})
+            nav_ratio = p.get("nav_link_ratio", 0.0)
+            bp_count = p.get("boilerplate_pattern_count", 0)
+            words = p.get("word_count", 0)
+            table_count = p.get("table_count", 0)
+            heading_count = p.get("heading_count", 0)
+            list_count = p.get("list_count", 0)
+            code_block_count = p.get("code_block_count", 0)
+            appears_truncated = (p.get("content_completeness", "") == "appears_truncated")
+            content_completeness = p.get("content_completeness", "unknown")
+            domain_type = p.get("domain_type", "unknown")
+            detected_language = p.get("detected_language", "en")
             
-            nav_ratio = noise.get("nav_link_ratio", 0.0)
-            bp_count = noise.get("boilerplate_pattern_count", 0)
-            words = size.get("total_words", 0)
-            table_count = struct.get("table_count", 0)
-            appears_truncated = p.get("completeness", {}).get("appears_truncated", False)
-            content_completeness = content.get("content_completeness", "unknown")
-            domain_type = struct.get("domain_type", p.get("domain_type", "unknown"))
-            
-            # Using overall fidelity score for now as per-URL fidelity is not explicitly tracked in eval_result.document_profiles
-            fid_score = overall_fidelity
+            fid_score = p.get("scrape_score", overall_fidelity)
             
             tables_preserved = (table_count > 0 and fid_score >= 0.7)
             
@@ -295,6 +301,7 @@ class SignalGenerator:
             if words < 100: issues.append("thin_content")
             if content_completeness == "navigation_only": issues.append("navigation_only")
             if content_completeness == "error_page": issues.append("error_page")
+            if detected_language not in ("en", "mixed", ""): issues.append(f"non_english_content_{detected_language}")
             
             ql = "unusable"
             if fid_score >= 0.80: ql = "excellent"

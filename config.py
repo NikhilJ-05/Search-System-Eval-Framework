@@ -21,7 +21,7 @@ class EvalConfig:
     # Models (OpenRouter slugs)
     generator_model: str = "minimax/minimax-m3"
     judge_model: str = "deepseek/deepseek-v4-flash"
-    extraction_model: str = ""
+
     improvement_agent_model: str = "qwen/qwen3.7-plus"
 
     # Eval settings
@@ -98,7 +98,7 @@ class EvalConfig:
             qdrant_collection=os.environ.get("QDRANT_COLLECTION_NAME", "firecrawl_eval"),
             generator_model=os.environ.get("GENERATOR_MODEL", "minimax/minimax-m3"),
             judge_model=os.environ.get("JUDGE_MODEL", "deepseek/deepseek-v4-flash"),
-            extraction_model=os.environ.get("EXTRACTION_MODEL", ""),
+
             improvement_agent_model=os.environ.get("IMPROVEMENT_AGENT_MODEL", "qwen/qwen3.7-plus"),
             num_test_cases=int(os.environ.get("NUM_TEST_CASES", "30")),
             search_results_per_query=int(os.environ.get("SEARCH_RESULTS_PER_QUERY", "5")),

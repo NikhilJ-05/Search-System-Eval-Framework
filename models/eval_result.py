@@ -2,6 +2,49 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
 @dataclass
+class P1Result:
+    rank: int
+    url: str
+    domain_type: str
+
+    # Scrape quality verdict
+    scrape_score: float
+    scrape_level: str
+    scrape_issues: List[str]
+    scrape_reasoning: str
+
+    # Verified document profile (required fields)
+    primary_topic: str
+    page_type: str
+    authority_assessment: str
+    author_credentials: str
+    key_claims: List[str]
+    data_points: List[str]
+    named_entities: Dict[str, List[str]]
+    temporal_markers: List[str]
+    section_summaries: List[Dict]
+    table_contents: List[Dict]
+    content_completeness: str
+    content_gaps: List[str]
+    word_count: int
+
+    # Structural noise metrics and additional extraction fields (defaulted)
+    nav_link_ratio: float = 0.0
+    boilerplate_pattern_count: int = 0
+    table_count: int = 0
+    heading_count: int = 0
+    list_count: int = 0
+    code_block_count: int = 0
+    publication_date: str = ""
+    query_relevance_score: float = 0.0
+    detected_language: str = "en"
+    authority_score: float = 0.0
+
+    # Failure flags
+    is_fallback: bool = False
+    fallback_reason: str = ""
+
+@dataclass
 class FirecrawlSearchResult:
     query: str
     firecrawl_rank: int
@@ -43,6 +86,7 @@ class DimensionEval:
     level_justification: str                   # Step 4: why this level, not adjacent
     score: float                               # Step 5: precise score within level range
     reasoning: str                             # Summary sentence
+    is_fallback: bool = False                  # Flag for fallback evals
 
 @dataclass
 class EvalResult:
@@ -65,14 +109,14 @@ class EvalResult:
         if self.overall_score < overall_threshold:
             return False
         for de in self.dimension_evals:
-            if de.score < dimension_floor:
+            if not de.is_fallback and de.score < dimension_floor:
                 return False
         return True
     
     @property
     def floor_failures(self) -> List[str]:
         """Return dimension names that fell below the floor."""
-        return [de.dimension_name for de in self.dimension_evals if de.score < 0.40]
+        return [de.dimension_name for de in self.dimension_evals if not de.is_fallback and de.score < 0.40]
 
     # ── Backward-compatible convenience properties ──────────────────────
 

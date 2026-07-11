@@ -201,10 +201,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (ev.type === 'run_complete') {
                     dot.className = 'dot done';
-                    statusText.textContent = `Complete · score=${ev.overall_score?.toFixed(3)}`;
+                    statusText.textContent = `Complete | score=${ev.overall_score?.toFixed(3)}`;
                     prog.style.width = '100%';
                     sseSource.close();
-                    showToast('Run Complete', \`Evaluation finished with score \${ev.overall_score?.toFixed(3)}\`, 'success');
+                    showToast('Run Complete', `Evaluation finished with score ${ev.overall_score?.toFixed(3)}`, 'success');
                     loadRuns();
                     loadRunDetails(runId);
                 } else if (ev.type === 'run_error') {
@@ -259,7 +259,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <h4>Diagnosis Triggered <span class="tc-id">${ev.tc_id}</span></h4>
                 <p style="font-size: 0.8rem; margin:4px 0 0 0; color:var(--text-secondary)">Detected underperformance. Analyzing root cause...</p>
             `;
-            showToast('Diagnosis Initiated', \`TC \${ev.tc_id} scored poorly. Running diagnostics.\`, 'warning');
+            showToast('Diagnosis Initiated', `TC ${ev.tc_id} scored poorly. Running diagnostics.`, 'warning');
         } else if (ev.type === 'tc_complete') {
             contentHtml = `
                 <h4>Test Case Complete <span class="tc-id">${ev.tc_id}</span></h4>
@@ -572,6 +572,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch(`/api/rl/signals/${runId}`);
             if (!res.ok) return;
             const rlData = await res.json();
+            
+            const exportBtn = document.getElementById('btn-export-rl');
+            if (exportBtn) {
+                exportBtn.onclick = () => {
+                    if (!rlData.dpo_pairs || !rlData.dpo_pairs.length) return showToast('Info', 'No DPO pairs available to export', 'info');
+                    const blob = new Blob([JSON.stringify(rlData.dpo_pairs, null, 2)], { type: 'application/json' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `dpo_pairs_${runId}.json`;
+                    a.click();
+                };
+            }
 
             // DPO
             const dpoContainer = document.getElementById('rl-panel-dpo');
@@ -663,19 +676,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 `;
             }
 
-            // Export Button
-            const exportBtn = document.getElementById('btn-export-rl');
-            if (exportBtn) {
-                exportBtn.onclick = () => {
-                    const blob = new Blob([JSON.stringify(rlData.dpo_pairs, null, 2)], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `dpo_pairs_${runId}.json`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                };
-            }
+
         } catch (e) {
             console.error('populateRLSignals error:', e);
         }
