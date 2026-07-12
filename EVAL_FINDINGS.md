@@ -252,6 +252,25 @@ The new rubric-first architecture produces TC-specific dimensions that probe exa
 
 ---
 
+## Judge Bias Warnings
+
+### ⚠️ Dual `_baseline_fidelity` Scoring Contradiction
+
+In several TCs (most clearly `tc_a345a697` and `tc_e4e371ec`), the `_baseline_fidelity` dimension is evaluated twice — once by the `_aggregate_fidelity()` deterministic path and once by a P2 judge that received a custom fidelity-adjacent dimension routed to it. The two evaluations produce dramatically different scores:
+
+- `tc_a345a697`: Evaluation 1 → 0.9 (L5, "faithfully reproduces"), Evaluation 2 → 0.312 (L2, inverted score)
+- `tc_e4e371ec`: Evaluation 1 → 0.9 (L5), Evaluation 2 → 0.228 (L2)
+
+This is a **routing conflict**, not a judge bias issue. When a TC's custom rubric contains a dimension with keywords like "structural_fidelity" or "content_fidelity," the `_route_dimensions()` keyword matcher assigns it to the coverage family (default catch-all), and it's evaluated by a P2 judge. The baseline enforcer then injects `_baseline_fidelity` on top. Two fidelity evaluations are now live, and the floor gate takes the minimum — which is always the inverted P1 score.
+
+**Fix:** Check if any custom dimension already covers fidelity before injecting `_baseline_fidelity`.
+
+### ⚠️ `source_authority` Scores HIGH While Per-TC Diagnoses Show Low-Authority Sources
+
+`source_authority` averages 0.838 across all TCs, with 12/17 TCs in the 0.8–1.0 range. This seems inconsistent with the 13 TCs showing social media pollution. However, this is not a bias issue — the `_baseline_authority` dimension (avg 0.73) is the one that correctly captures the authority failures. The custom `source_authority` dimensions were generated for TCs where authority was specifically tested (healthcare, academic) and not for the travel/social-media-heavy TCs.
+
+---
+
 ## Chaos Archetype Analysis
 
 | Archetype | TCs | Avg Score | Notes |
@@ -743,27 +762,6 @@ Apply a rule: if `domain in SOCIAL_DOMAINS AND word_count < 100`, apply 0.5× ra
 #### Quick Win 4 — Scrape_score Sanity Assertion (+0 score, prevents regression)
 
 Add a runtime assertion: if `scrape_reasoning` contains "faithfully" AND `scrape_issues` is empty, then `scrape_score` must be ≥ 0.70. This catches the inversion bug before it propagates into fidelity aggregation and flags calibration drift in future runs.
-
----
-
-## Judge Bias Warnings
-
-![Diagnostics — Per-TC root cause diagnosis cards](./screenshots_new/rl_diagnostics.png)
-
-### ⚠️ Dual `_baseline_fidelity` Scoring Contradiction
-
-In several TCs (most clearly `tc_a345a697` and `tc_e4e371ec`), the `_baseline_fidelity` dimension is evaluated twice — once by the `_aggregate_fidelity()` deterministic path and once by a P2 judge that received a custom fidelity-adjacent dimension routed to it. The two evaluations produce dramatically different scores:
-
-- `tc_a345a697`: Evaluation 1 → 0.9 (L5, "faithfully reproduces"), Evaluation 2 → 0.312 (L2, inverted score)
-- `tc_e4e371ec`: Evaluation 1 → 0.9 (L5), Evaluation 2 → 0.228 (L2)
-
-This is a **routing conflict**, not a judge bias issue. When a TC's custom rubric contains a dimension with keywords like "structural_fidelity" or "content_fidelity," the `_route_dimensions()` keyword matcher assigns it to the coverage family (default catch-all), and it's evaluated by a P2 judge. The baseline enforcer then injects `_baseline_fidelity` on top. Two fidelity evaluations are now live, and the floor gate takes the minimum — which is always the inverted P1 score.
-
-**Fix:** Check if any custom dimension already covers fidelity before injecting `_baseline_fidelity`.
-
-### ⚠️ `source_authority` Scores HIGH While Per-TC Diagnoses Show Low-Authority Sources
-
-`source_authority` averages 0.838 across all TCs, with 12/17 TCs in the 0.8–1.0 range. This seems inconsistent with the 13 TCs showing social media pollution. However, this is not a bias issue — the `_baseline_authority` dimension (avg 0.73) is the one that correctly captures the authority failures. The custom `source_authority` dimensions were generated for TCs where authority was specifically tested (healthcare, academic) and not for the travel/social-media-heavy TCs.
 
 ---
 

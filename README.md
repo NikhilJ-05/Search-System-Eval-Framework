@@ -1,5 +1,11 @@
 # EvalOS Framework
 
+[![License: PolyForm NonCommercial](https://img.shields.io/badge/License-PolyForm%20NC-blue.svg)](https://polyformproject.org/licenses/noncommercial/1.0.0)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688.svg)](https://fastapi.tiangolo.com/)
+[![Qdrant](https://img.shields.io/badge/Qdrant-vector_search-DC143C.svg)](https://qdrant.tech/)
+[![BGE-M3](https://img.shields.io/badge/BGE--M3-hybrid_search-orange.svg)](https://huggingface.co/BAAI/bge-m3)
+
 > **A multi-agent evaluation framework for agentic search systems** — designed to continuously measure, diagnose, and generate training signals for production search pipelines like Firecrawl.
 
 EvalOS closes the feedback loop between search output quality and model improvement. It does this through a fully automated pipeline: dynamically generated adversarial test cases → P1/P2 multi-agent judging → structured RL training signal export → cross-run improvement analysis. Every component is observable through a real-time web dashboard.
@@ -28,9 +34,9 @@ EvalOS closes the feedback loop between search output quality and model improvem
    - [Ranking Comparator](#ranking-comparator)
 6. [Data Models](#data-models)
 7. [Output Structure](#output-structure)
-8. [Configuration Reference](#configuration-reference)
-9. [Running the Pipeline](#running-the-pipeline)
-10. [Dashboard Walkthrough](#dashboard-walkthrough)
+8. [Running the Pipeline](#running-the-pipeline)
+9. [Dashboard Walkthrough](#dashboard-walkthrough)
+10. [Evaluation Findings](#evaluation-findings)
 11. [Extending the System](#extending-the-system)
 12. [Known Issues & Planned Improvements](#known-issues--planned-improvements)
 
@@ -851,6 +857,19 @@ Stats grid showing total document chunks, unique pages indexed, and deduplicatio
 
 ---
 
+## Evaluation Findings
+
+The [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) document contains the full analysis of the first run under this architecture (`run_20260712_180951` — 30 TCs, 72 minutes).
+
+Key findings covered:
+- **0% pass rate** — explained as a combination of a real social media ranking problem (43% of TCs) and a P1 scrape_score calibration defect
+- **Scrape score inversion** — complete 3,000-word articles scored L1 (0.20) while truncated 25-word posts scored L4 (0.79)
+- **Multi-hop query gap** — 3-hop compound queries have a 100% failure rate under single-pass retrieval
+- **500 RL training signals** across 7 types generated from 30 test cases
+- **Prioritized fix roadmap** with code-level Quick Wins that would push 10–15 TCs to passing
+
+---
+
 ## Extending the System
 
 ### Adding a New Chaos Archetype
@@ -945,4 +964,12 @@ This section documents known architectural gaps identified in the current implem
 
 ---
 
+## 📄 License
 
+This project is licensed under the **PolyForm NonCommercial License 1.0.0**.
+
+- ✅ Free for personal use, research, education, and non-commercial projects
+- ✅ Academic institutions and public research organizations
+- ❌ Commercial use, SaaS products, or offering this as a managed service
+
+See the [LICENSE](LICENSE) file for full terms, or read the [PolyForm NonCommercial summary](https://polyformproject.org/licenses/noncommercial/1.0.0).
