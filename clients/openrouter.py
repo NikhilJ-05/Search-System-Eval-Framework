@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class OpenRouterClient:
     BASE_URL = "https://openrouter.ai/api/v1"
 
-    def __init__(self, key: str):
+    def __init__(self, key: str, read_timeout_s: int = 3600):
         self._key_hint = f"...{key[-6:]}" if key and len(key) > 6 else key
         limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
         self._http_client = httpx.AsyncClient(
@@ -23,10 +23,10 @@ class OpenRouterClient:
                 "X-Title": "Firecrawl Eval",
             },
             timeout=httpx.Timeout(
-                connect=30.0,
-                read=1800.0,
-                write=60.0,
-                pool=30.0
+                connect=60.0,
+                read=float(read_timeout_s),
+                write=120.0,
+                pool=60.0
             ),
             limits=limits,
         )
@@ -40,7 +40,7 @@ class OpenRouterClient:
         temperature: float = 0.1,
         system_prompt: str = None,
         providers: List[str] = None
-    ) -> str:
+    ) -> Tuple[str, bool]:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -110,16 +110,22 @@ class OpenRouterClient:
                     )
                     raise ValueError("LLM returned empty content in response.")
 
+                finish_reason = choices[0].get('finish_reason')
+                was_truncated = finish_reason == "length"
+                
+                if was_truncated:
+                    logger.warning("[OpenRouter] LLM output truncated (finish_reason=length).")
+
                 logger.info(
                     f"[OpenRouter] ✓ Got {len(raw)} chars of content "
-                    f"(finish_reason={choices[0].get('finish_reason')})"
+                    f"(finish_reason={finish_reason})"
                 )
                 logger.debug(f"[OpenRouter] raw[:300]: {raw[:300]}")
 
                 # Strip thinking blocks if model outputs them
                 import re
                 final_response = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-                return final_response
+                return final_response, was_truncated
 
             except httpx.HTTPStatusError as e:
                 elapsed = time.time() - t0
@@ -161,7 +167,8 @@ class OpenRouterClientPool:
             logger.warning("[OpenRouterPool] No OPENROUTER_KEY_* found.")
             keys = ["dummy"]
         logger.info(f"[OpenRouterPool] Initialized with {len(keys)} key(s).")
-        self._clients = [OpenRouterClient(k) for k in keys]
+        read_timeout = getattr(config, 'llm_read_timeout_s', 3600)
+        self._clients = [OpenRouterClient(k, read_timeout_s=read_timeout) for k in keys]
         self._in_flight: Dict[int, int] = {i: 0 for i in range(len(self._clients))}
         self._cooldowns: Dict[int, float] = {}
         self._lock = asyncio.Lock()  # protect _in_flight + _cooldowns under concurrency
@@ -211,7 +218,7 @@ class OpenRouterClientPool:
         temperature: float = 0.1,
         system_prompt: str = None,
         providers: List[str] = None
-    ) -> str:
+    ) -> Tuple[str, bool]:
         max_attempts = len(self._clients) * 3 + 1
         logger.info(
             f"[OpenRouterPool] generate() model={model} providers={providers} "

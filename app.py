@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
+from contextlib import asynccontextmanager
 import os
 
 from config import EvalConfig
@@ -20,7 +21,14 @@ from search_ir.retriever import Retriever
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Firecrawl Eval Dashboard")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await qdrant.init_collection()
+    await qdrant.init_query_cache_collection()
+    await embedder.warmup()
+    yield
+
+app = FastAPI(title="Firecrawl Eval Dashboard", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -37,11 +45,7 @@ retriever = Retriever(qdrant, embedder)
 # Store queues for active runs
 active_queues = {}
 
-@app.on_event("startup")
-async def startup_event():
-    await qdrant.init_collection()
-    await qdrant.init_query_cache_collection()
-    await embedder.warmup()
+
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
@@ -67,6 +71,25 @@ async def get_run(run_id: str):
     data = store._get_full_run(run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
+        
+    meta = store.get_run_status(run_id) or {}
+    config = data.get("run_meta", {})
+    
+    dimensions = []
+    results = data.get("eval_results", [])
+    if results:
+        for r in results:
+            if "dimension_evals" in r and r["dimension_evals"]:
+                dimensions = [{"name": d["dimension_name"], "weight": d.get("weight", 0), "description": ""} for d in r["dimension_evals"]]
+                break
+                
+    data["metadata"] = {
+        "status": meta.get("status", data.get("status")),
+        "overall_score": meta.get("overall_score"),
+        "config": config,
+        "dimensions": dimensions,
+        "duration": meta.get("duration_s")
+    }
     return data
 
 @app.get("/api/runs/{run_id}/status")
@@ -144,8 +167,14 @@ async def get_run_test_cases(run_id: str):
 async def start_run(background_tasks: BackgroundTasks):
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    q = asyncio.Queue()
+    q = asyncio.Queue(maxsize=500)
     active_queues[run_id] = q
+    
+    async def _cleanup_queue_after_timeout():
+        await asyncio.sleep(7200)
+        active_queues.pop(run_id, None)
+        
+    background_tasks.add_task(_cleanup_queue_after_timeout)
     
     async def run_pipeline_task():
         # ContextVar requires running within context
@@ -191,13 +220,12 @@ async def search_kb(q: str):
 @app.get("/api/kb/stats")
 async def get_kb_stats():
     qdrant_stats = await qdrant.get_collection_stats()
-    from eval.test_case_history import TestCaseHistory
-    tc_count = TestCaseHistory().count()
+    points = qdrant_stats.get("points_count", 0)
     return {
-        "points_count": qdrant_stats.get("points_count", 0),
+        "points_count": points,
         "vectors_count": qdrant_stats.get("vectors_count", 0),
-        "unique_urls": tc_count * 5,
-        "deduped_count": int(qdrant_stats.get("points_count", 0) * 0.15),
+        "unique_urls": points,
+        "deduped_count": 0,
         "status": qdrant_stats.get("status", "ok")
     }
 

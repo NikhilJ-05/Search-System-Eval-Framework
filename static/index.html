@@ -66,7 +66,7 @@
                             <div class="empty-msg">Waiting for pipeline events...</div>
                         </div>
                         <div class="live-scores-sidebar">
-                            <h4>Real-time TC Leaderboard</h4>
+                            <h4>Live Leaderboard</h4>
                             <div class="live-scores-grid" id="live-scores-grid">
                                 <div class="empty-msg">No live scores yet</div>
                             </div>
@@ -77,7 +77,7 @@
                 <!-- Dimensions View (NEW) -->
                 <div id="view-dimensions" class="view">
                     <div class="dimensions-header">
-                        <h3>Evaluation Rubric Dimensions</h3>
+                        <h3>Rubric Dimensions</h3>
                         <p class="subtitle">Detailed breakdown of the criteria used in this run.</p>
                     </div>
                     <div id="dimensions-grid" class="dimensions-grid">
@@ -89,7 +89,7 @@
                 <!-- Overview View -->
                 <div id="view-overview" class="view">
                     <div class="overview-section">
-                        <h3>Key Dimension Performance</h3>
+                        <h3>Performance Overview</h3>
                         <div id="dynamic-rings-container" class="scores-grid">
                             <!-- Rings populated dynamically -->
                             <div class="empty-msg">Load a run to see overview</div>
@@ -129,7 +129,7 @@
                 <!-- Report View -->
                 <div id="view-report" class="view">
                     <div class="report-header">
-                        <h3>Detailed Markdown Report</h3>
+                        <h3>Evaluation Report</h3>
                         <button id="btn-download-report" class="btn-secondary" style="display: none;">📥 Download Report</button>
                     </div>
                     <div id="report-content" class="markdown-body">
@@ -142,7 +142,7 @@
                     <div class="rl-header">
                         <div class="rl-tabs">
                             <button class="rl-tab active" data-panel="dpo">DPO Pairs</button>
-                            <button class="rl-tab" data-panel="taxonomy">Pattern Taxonomy</button>
+                            <button class="rl-tab" data-panel="taxonomy">Taxonomy</button>
                             <button class="rl-tab" data-panel="diagnostics">Diagnostics</button>
                             <button class="rl-tab" data-panel="rewards">Rewards</button>
                         </div>
@@ -157,8 +157,8 @@
                 <!-- KB Explorer View -->
                 <div id="view-kb" class="view">
                     <div class="kb-stats-grid" id="kb-stats-grid">
-                        <div class="kb-stat"><span id="kb-doc-count">—</span><label>Collection Points</label></div>
-                        <div class="kb-stat"><span id="kb-url-count">—</span><label>Unique URLs</label></div>
+                        <div class="kb-stat"><span id="kb-doc-count">—</span><label>Total Documents</label></div>
+                        <div class="kb-stat"><span id="kb-url-count">—</span><label>Unique Pages</label></div>
                         <div class="kb-stat"><span id="kb-dedup-count">—</span><label>Deduped Hits</label></div>
                         <div class="kb-stat"><span id="kb-status">—</span><label>Status</label></div>
                     </div>

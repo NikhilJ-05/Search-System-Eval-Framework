@@ -25,9 +25,9 @@ class P1Result:
     section_summaries: List[Dict]
     table_contents: List[Dict]
     content_completeness: str
-    content_gaps: List[str]
+    content_gaps: List[Dict[str, str]]
     word_count: int
-
+    query_coverage_assessment: Optional[Dict[str, Any]] = None
     # Structural noise metrics and additional extraction fields (defaulted)
     nav_link_ratio: float = 0.0
     boilerplate_pattern_count: int = 0

@@ -65,6 +65,7 @@ class ImprovementAnalysis:
     enhanced_patterns: List[dict] = field(default_factory=list)
     quick_wins: List[dict] = field(default_factory=list)
     cross_dimension_patterns: List[dict] = field(default_factory=list)
+    validation_warnings: List[str] = field(default_factory=list)
 
 class ImprovementAgent:
     def __init__(self, config: EvalConfig, or_pool: OpenRouterClientPool):
@@ -182,7 +183,6 @@ class ImprovementAgent:
             if getattr(res, 'document_profiles', None):
                 worst_p = min(res.document_profiles, key=lambda p: p.get("scrape_score", 1.0))
                 worst_url = worst_p.get("url", "")
-                worst_p_dict = worst_p
             for de in getattr(res, 'dimension_evals', []):
                 if any(kw in de.dimension_name.lower() for kw in ["fidelity", "scrape", "structure"]):
                     worst_sq_issues.extend([f"NOT_MET: {c.condition}" for c in de.criteria_checklist if c.status == "NOT_MET"])
@@ -200,8 +200,7 @@ class ImprovementAgent:
                     for de in getattr(res, 'dimension_evals', [])
                 ],
                 "worst_scrape_url": worst_url,
-                "worst_scrape_issues": worst_sq_issues,
-                "worst_scrape_profile": worst_p_dict
+                "worst_scrape_issues": worst_sq_issues
             })
 
         # Category breakdown
@@ -255,7 +254,32 @@ class ImprovementAgent:
             "issue_frequency": issue_counts,
             "cache_analytics": cache_analytics,
             "retrieval_comparison": retrieval_comparison,
-            "per_tc_diagnoses": [dataclasses.asdict(d) for d in tc_diagnoses] if tc_diagnoses else []
+            "per_tc_diagnoses_summary": [
+                {
+                    "tc_id": d.tc_id,
+                    "passed": d.passed,
+                    "overall_score": d.overall_score,
+                    "failure_dimensions": d.failure_dimensions,
+                    "root_cause_summary": d.root_cause_summary,
+                    "micro_pattern": d.micro_pattern,
+                    "query_reformulation": d.query_reformulation,
+                }
+                for d in (tc_diagnoses or [])
+            ],
+            "scrape_evidence": {
+                tc_id: [
+                    {
+                        "url": r.url,
+                        "rank": getattr(r, "firecrawl_rank", 0),
+                        "cache_status": getattr(r, "scrape_cache_status", "unknown"),
+                        "has_content": bool(r.full_markdown),
+                        "content_length": len(r.full_markdown) if r.full_markdown else 0,
+                        "snippet": (r.full_markdown or "")[:300]
+                    }
+                    for r in results
+                ]
+                for tc_id, results in search_results_dict.items()
+            }
         }
 
     async def analyze(self, test_cases: List[TestCase], eval_results: List[EvalResult], 
@@ -271,7 +295,8 @@ class ImprovementAgent:
                 judge_bias_flags=[],
                 enhanced_patterns=[{"issue": "placeholder", "frequency": "N/A", "description": "Placeholder pattern", "suggested_fix": "Set valid model"}],
                 quick_wins=[{"title": "Configure LLM Model", "description": "Add IMPROVEMENT_AGENT_MODEL to environment", "expected_impact": "Full diagnostic analysis activated"}],
-                cross_dimension_patterns=[{"pattern": "N/A", "hypothesis": "Mock agent mode active"}]
+                cross_dimension_patterns=[{"pattern": "N/A", "hypothesis": "Mock agent mode active"}],
+                validation_warnings=[]
             )
 
         agent_input = self._build_agent_input(test_cases, eval_results, search_results_dict, cache_analytics, retrieval_comparison, tc_diagnoses)
@@ -288,8 +313,22 @@ You are a senior Search/IR engineer at Firecrawl. You have just received evaluat
 
 Be concrete. Don't say "improve ranking". Say "the recency signal is too weak for queries containing year references — results from 2024 are ranking above 2026 content in 40% of rapidly_changing queries."
 
+GUARDRAILS (non-obvious conventions — apply carefully):
+- evidence in root_causes MUST reference specific tc_ids present in per_tc_diagnoses_summary.
+  Do not invent tc_id references.
+- priority_score MUST reflect the formula (impact_magnitude × failure_frequency) / effort_level
+  where impact_magnitude ∈ [1-3], failure_frequency ∈ [1-3], effort_level ∈ [1-3].
+  The resulting range is [0.33 - 9.0] — do not output values outside this range.
+- judge_bias_flags should only be raised when the same dimension consistently scores HIGH
+  while per_tc_diagnoses show FAILING root causes in that dimension (score/diagnosis
+  contradiction). Do not flag bias simply because scores are lower than expected.
+- affected_tcs lists in root_causes must be a subset of tc_ids present in the input data.
+
 Output JSON schema:
 {
+  "step1_pattern_observations": [
+    "<observation from score_distributions or per_tc_diagnoses_summary>"
+  ],
   "root_causes": [
     {
       "id": "rc_001",
@@ -343,7 +382,7 @@ Output JSON schema:
 
         use_response_format = None if "glm" in self.model.lower() else {"type": "json_object"}
         try:
-            raw_response = await self.or_pool.generate(
+            raw_response, _ = await self.or_pool.generate(
                 prompt=prompt,
                 model=self.model,
                 temperature=0.2,
@@ -373,6 +412,23 @@ Output JSON schema:
                         clean_response = clean_response[start:end+1]
             
             data = json.loads(clean_response)
+            
+            valid_tc_ids = {tc.id for tc in test_cases}
+            validation_warnings = []
+            for rc in data.get("root_causes", []):
+                for tc_id in rc.get("affected_tcs", []):
+                    if tc_id not in valid_tc_ids:
+                        validation_warnings.append(f"root_cause '{rc.get('id')}' references unknown tc_id '{tc_id}'")
+            for ip in data.get("proposals", []):
+                try:
+                    ps = float(ip.get("priority_score", 5.0))
+                    if not (0.33 <= ps <= 9.0):
+                        validation_warnings.append(f"proposal '{ip.get('id')}': priority_score {ps} outside valid range [0.33, 9.0]")
+                except (ValueError, TypeError):
+                    validation_warnings.append(f"proposal '{ip.get('id')}': invalid priority_score format")
+            
+            if validation_warnings:
+                logger.warning(f"Improvement Analysis validation warnings: {validation_warnings}")
             
             root_causes = [
                 RootCause(
@@ -406,7 +462,8 @@ Output JSON schema:
                 judge_bias_flags=data.get("judge_bias_flags", []),
                 enhanced_patterns=data.get("enhanced_patterns", []),
                 quick_wins=data.get("quick_wins", []),
-                cross_dimension_patterns=data.get("cross_dimension_patterns", [])
+                cross_dimension_patterns=data.get("cross_dimension_patterns", []),
+                validation_warnings=validation_warnings
             )
         except Exception as e:
             logger.error(f"Improvement Agent analysis failed: {e}")
@@ -444,51 +501,95 @@ Output JSON schema:
         if passed and not floor_fails:
             system_prompt = """IMPORTANT: You MUST respond entirely in English. Do not use any Chinese or other non-English characters in your output.
 You are a Search/IR improvement analyst at Firecrawl. This test case PASSED evaluation, but even passing results have optimization opportunities. Analyze the near-miss dimensions, identify structural patterns that could regress under harder queries, and suggest proactive improvements.
+
+GUARDRAILS (non-obvious conventions — apply carefully):
+- root_cause_summary in step4 MUST reference specific evidence cited in step1. Generic
+  diagnoses like "poor scrape quality" without citing a URL and scrape_score are invalid.
+- dpo_rationale MUST reference actual URLs from the search_results input, not placeholder text.
+- url_quality_annotations MUST only contain URLs present in the input search_results list.
+- Do not blame the judge for failures unless judge_bias is explicitly signalled in the
+  input warnings list. The judge's P1 profiles are pre-validated.
+- improvement_actions must be engineering actions (code/config changes), not process
+  recommendations ("improve monitoring", "review outputs").
+
 Output JSON schema:
 {
-  "root_cause_summary": "1-2 sentence description of near-misses or structural observations",
-  "coverage_diagnosis": "Explain what expected terms were missing or weakly represented",
-  "ranking_diagnosis": "Explain any minor ranking deviations",
-  "scrape_diagnosis": "Explain formatting/noise/completeness issues in crawled markdown",
-  "improvement_actions": ["concrete action 1", "concrete action 2"],
-  "micro_pattern": {
-    "pattern_type": "<short snake_case pattern name, e.g. table_flattening>",
-    "affected_dimension": "<fidelity|ranking|coverage|overall>",
-    "severity": "observation",
-    "description": "Concrete 1-2 sentence description of the pattern",
-    "suggested_fix": "Actionable engineering fix"
+  "step1_failing_evidence": [
+    "<specific quote from dimension_evals evidence_found or document_profiles>"
+  ],
+  "step2_near_miss_hypothesis": "<one sentence: the primary failure mechanism>",
+  "step3_alternative_causes_ruled_out": [
+    "<alternative hypothesis and why it does not fit the evidence>"
+  ],
+  "step4_diagnosis": {
+    "root_cause_summary": "<1-2 sentences — must be traceable to step1 evidence>",
+    "coverage_diagnosis": "<observable gap in document profiles>",
+    "ranking_diagnosis": "<specific position deviation if applicable, else 'N/A'>",
+    "scrape_diagnosis": "<specific scrape_issues from profiles, else 'N/A'>"
   },
-  "dpo_rationale": "Rank X result (...) should be preferred over Rank Y (...) because...",
-  "url_quality_annotations": [
-    {"url": "<url>", "quality_score": <0.0 to 1.0>, "quality_note": "<short note>", "ideal_rank_suggestion": <int>}
-  ]
+  "step5_actions": {
+    "improvement_actions": ["<concrete action 1>", "<concrete action 2>"],
+    "micro_pattern": {
+      "pattern_type": "<snake_case name>",
+      "affected_dimension": "<fidelity|ranking|coverage|overall>",
+      "severity": "<critical|high|medium|low>",
+      "description": "<1-2 sentences — must cite specific evidence from step1>",
+      "suggested_fix": "<actionable engineering fix>"
+    },
+    "dpo_rationale": "<Rank X (url) preferred over Rank Y (url) because...>",
+    "url_quality_annotations": [
+      {"url": "<url>", "quality_score": 0.0, "quality_note": "<note>", "ideal_rank_suggestion": 1}
+    ]
+  }
 }"""
             prompt_header = "Find improvement opportunities for this PASSING test case:\n\n"
         else:
             system_prompt = """IMPORTANT: You MUST respond entirely in English. Do not use any Chinese or other non-English characters in your output.
 You are a Search/IR diagnostics agent at Firecrawl. This test case FAILED evaluation. Diagnose the root cause of each failing dimension, identify the specific structural or content issue in the document profiles, and recommend 1-3 concrete fix actions.
+
+GUARDRAILS (non-obvious conventions — apply carefully):
+- root_cause_summary in step4 MUST reference specific evidence cited in step1. Generic
+  diagnoses like "poor scrape quality" without citing a URL and scrape_score are invalid.
+- dpo_rationale MUST reference actual URLs from the search_results input, not placeholder text.
+- url_quality_annotations MUST only contain URLs present in the input search_results list.
+- Do not blame the judge for failures unless judge_bias is explicitly signalled in the
+  input warnings list. The judge's P1 profiles are pre-validated.
+- improvement_actions must be engineering actions (code/config changes), not process
+  recommendations ("improve monitoring", "review outputs").
+
 Output JSON schema:
 {
-  "root_cause_summary": "1-2 sentence description of main issue",
-  "coverage_diagnosis": "Explain what expected terms were missing, if any",
-  "ranking_diagnosis": "Explain why ranking diverged from ideal ranking, if any",
-  "scrape_diagnosis": "Explain formatting/noise/completeness issues in crawled markdown, if any",
-  "improvement_actions": ["concrete action 1", "concrete action 2"],
-  "micro_pattern": {
-    "pattern_type": "<short snake_case pattern name, e.g. table_flattening>",
-    "affected_dimension": "<fidelity|ranking|coverage|overall>",
-    "severity": "<critical|high|medium|low>",
-    "description": "Concrete 1-2 sentence description of the pattern",
-    "suggested_fix": "Actionable engineering fix"
-  },
-  "dpo_rationale": "Rank X result (...) should be preferred over Rank Y (...) because...",
-  "url_quality_annotations": [
-    {"url": "<url>", "quality_score": <0.0 to 1.0>, "quality_note": "<short note>", "ideal_rank_suggestion": <int>}
+  "step1_failing_evidence": [
+    "<specific quote from dimension_evals evidence_found or document_profiles>"
   ],
-  "query_reformulation": {
-    "reformulated_query": "<a better query string that would have retrieved more relevant results>",
-    "rationale": "<1-2 sentences explaining why this reformulation improves coverage or ranking>",
-    "expected_delta": "<e.g. +0.15 coverage, +0.10 ranking>"
+  "step2_root_cause_hypothesis": "<one sentence: the primary failure mechanism>",
+  "step3_alternative_causes_ruled_out": [
+    "<alternative hypothesis and why it does not fit the evidence>"
+  ],
+  "step4_diagnosis": {
+    "root_cause_summary": "<1-2 sentences — must be traceable to step1 evidence>",
+    "coverage_diagnosis": "<observable gap in document profiles>",
+    "ranking_diagnosis": "<specific position deviation if applicable, else 'N/A'>",
+    "scrape_diagnosis": "<specific scrape_issues from profiles, else 'N/A'>"
+  },
+  "step5_actions": {
+    "improvement_actions": ["<concrete action 1>", "<concrete action 2>"],
+    "micro_pattern": {
+      "pattern_type": "<snake_case name>",
+      "affected_dimension": "<fidelity|ranking|coverage|overall>",
+      "severity": "<critical|high|medium|low>",
+      "description": "<1-2 sentences — must cite specific evidence from step1>",
+      "suggested_fix": "<actionable engineering fix>"
+    },
+    "dpo_rationale": "<Rank X (url) preferred over Rank Y (url) because...>",
+    "url_quality_annotations": [
+      {"url": "<url>", "quality_score": 0.0, "quality_note": "<note>", "ideal_rank_suggestion": 1}
+    ],
+    "query_reformulation": {
+      "reformulated_query": "<a better query string that would have retrieved more relevant results>",
+      "rationale": "<1-2 sentences explaining why this reformulation improves coverage or ranking>",
+      "expected_delta": "<e.g. +0.15 coverage, +0.10 ranking>"
+    }
   }
 }"""
             prompt_header = "Diagnose this FAILING test case:\n\n"
@@ -543,7 +644,7 @@ Output JSON schema:
         
         use_response_format = None if "glm" in self.model.lower() else {"type": "json_object"}
         try:
-            raw_response = await self.or_pool.generate(
+            raw_response, _ = await self.or_pool.generate(
                 prompt=prompt,
                 model=self.model,
                 temperature=0.3,
@@ -584,15 +685,15 @@ Output JSON schema:
                 failure_dimensions=failure_dims,
                 weak_dimensions=weak_dims,
                 floor_failures=floor_fails,
-                root_cause_summary=data.get("root_cause_summary", "Unknown root cause"),
-                coverage_diagnosis=data.get("coverage_diagnosis", "N/A"),
-                ranking_diagnosis=data.get("ranking_diagnosis", "N/A"),
-                scrape_diagnosis=data.get("scrape_diagnosis", "N/A"),
-                improvement_actions=data.get("improvement_actions", []),
-                micro_pattern=data.get("micro_pattern"),
-                dpo_rationale=data.get("dpo_rationale"),
-                url_quality_annotations=data.get("url_quality_annotations", []),
-                query_reformulation=data.get("query_reformulation"),
+                root_cause_summary=data.get("step4_diagnosis", {}).get("root_cause_summary", "Unknown root cause"),
+                coverage_diagnosis=data.get("step4_diagnosis", {}).get("coverage_diagnosis", "N/A"),
+                ranking_diagnosis=data.get("step4_diagnosis", {}).get("ranking_diagnosis", "N/A"),
+                scrape_diagnosis=data.get("step4_diagnosis", {}).get("scrape_diagnosis", "N/A"),
+                improvement_actions=data.get("step5_actions", {}).get("improvement_actions", []),
+                micro_pattern=data.get("step5_actions", {}).get("micro_pattern"),
+                dpo_rationale=data.get("step5_actions", {}).get("dpo_rationale"),
+                url_quality_annotations=data.get("step5_actions", {}).get("url_quality_annotations", []),
+                query_reformulation=data.get("step5_actions", {}).get("query_reformulation"),
                 criteria_summary=criteria_summary
             )
         except Exception as e:

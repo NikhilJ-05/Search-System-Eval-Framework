@@ -2,6 +2,7 @@ import json
 import os
 import random
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from models.test_case import TestCase
 
@@ -17,9 +18,12 @@ class TestCaseHistory:
             
         # Ensure directory exists
         os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+        self._lock = asyncio.Lock()
+        self._cache: Optional[List[TestCase]] = None
+        self._cache_size: int = 0
         logger.info(f"Initialized TestCaseHistory at {self.history_file}")
 
-    def append(self, tc: TestCase) -> None:
+    def _append_sync(self, tc: TestCase) -> None:
         """Append a TestCase to the history file as a single line JSON."""
         import dataclasses
         try:
@@ -30,10 +34,19 @@ class TestCaseHistory:
         except Exception as e:
             logger.error(f"Failed to append test case to history: {e}")
 
+    async def append_async(self, tc: TestCase) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._append_sync, tc)
+            self._cache = None
+
     def load_all(self) -> List[TestCase]:
         """Load all test cases from history."""
         if not os.path.exists(self.history_file):
             return []
+        
+        current_size = self.count()
+        if self._cache is not None and self._cache_size == current_size:
+            return self._cache
         
         cases = []
         with open(self.history_file, "r", encoding="utf-8") as f:
@@ -47,6 +60,8 @@ class TestCaseHistory:
                 except Exception as e:
                     logger.warning(f"Failed to parse history line: {e}")
                     pass
+        self._cache = cases
+        self._cache_size = current_size
         return cases
 
     def sample(self, n: int) -> List[TestCase]:

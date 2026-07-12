@@ -1,9 +1,19 @@
 document.addEventListener('DOMContentLoaded', () => {
     // ---- GLOBALS & STATE ----
+    function escapeHtml(str) {
+        if (str == null) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
     let currentRunData = [];
     let currentRunId = '';
     let currentMetadata = {};
     let sseSource = null;
+    // Live update timer removed as we now use SSE payload directly
 
     // ---- UI CONSTANTS ----
     const ICONS = {
@@ -103,7 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function loadRunDetails(runId) {
+    async function loadRunDetails(runId, silent = false) {
         currentRunId = runId;
         document.getElementById('header-run-id').textContent = `Viewing: ${runId}`;
         
@@ -113,7 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         try {
             // Skeleton Views setup
-            showSkeletons();
+            if (!silent) showSkeletons();
 
             const res = await fetch(`/api/runs/${runId}`);
             if (!res.ok) throw new Error('Run not found');
@@ -126,7 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
             populateDimensionsView(currentMetadata.dimensions || []);
             populateOverview(currentRunData, currentMetadata.dimensions || []);
             populateTestCases(currentRunData, currentMetadata.dimensions || []);
-            populateRLSignals(runId, currentRunData);
+            fetchAndPopulateRLSignals(runId, currentRunData);
             
             // Load report
             const reportRes = await fetch(`/api/runs/${runId}/report`);
@@ -227,8 +237,33 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function handleLiveEvent(ev, feed, prog, liveScores) {
+        if (ev.type === 'state_update') {
+            if (ev.eval_results) {
+                currentRunData = ev.eval_results;
+                if (!currentMetadata.dimensions && ev.eval_results.length > 0 && ev.eval_results[0].dimensions) {
+                     currentMetadata.dimensions = Object.keys(ev.eval_results[0].dimensions).map(k => ({name: k}));
+                     populateDimensionsView(currentMetadata.dimensions);
+                }
+                populateOverview(currentRunData, currentMetadata.dimensions || []);
+                populateTestCases(currentRunData, currentMetadata.dimensions || []);
+            }
+            if (ev.rl_signals) {
+                renderRLSignals(ev.rl_signals, currentRunId);
+            }
+            if (ev.kb_stats) {
+                document.getElementById('kb-doc-count').textContent = ev.kb_stats.points_count || 0;
+                document.getElementById('kb-url-count').textContent = ev.kb_stats.unique_urls || 0;
+                document.getElementById('kb-dedup-count').textContent = ev.kb_stats.deduped_count || 0;
+                document.getElementById('kb-status').textContent = ev.kb_stats.status || 'Active';
+            }
+            return; // no timeline item for this
+        }
+
         if (ev.type === 'config') {
             populateLiveConfig(ev.config);
+            return;
+        } else if (ev.type === 'run_start') {
+            if (ev.config_snapshot) populateLiveConfig(ev.config_snapshot);
             return;
         }
 
@@ -247,6 +282,13 @@ document.addEventListener('DOMContentLoaded', () => {
         let contentHtml = '';
         if (ev.type === 'stage_start') {
             contentHtml = `<h4>${ev.stage} started</h4>`;
+        } else if (ev.type === 'phase_start') {
+            contentHtml = `<h4>${ev.message || ev.phase + ' started'}</h4>`;
+        } else if (ev.type === 'firecrawl_search_done') {
+            contentHtml = `
+                <h4>Search Complete <span class="tc-id">${ev.tc_id}</span></h4>
+                <div style="font-size: 0.85rem; color:var(--text-secondary)">Retrieved ${ev.result_count} results</div>
+            `;
         } else if (ev.type === 'dimension_scored') {
             contentHtml = `
                 <h4>Dimension Scored <span class="tc-id">${ev.tc_id}</span></h4>
@@ -340,7 +382,8 @@ document.addEventListener('DOMContentLoaded', () => {
         panel.classList.remove('hidden');
         panel.innerHTML = `
             <div class="config-item">Generator: <strong>${config.generator_model || 'Unknown'}</strong></div>
-            <div class="config-item">Judge: <strong>${config.judge_model || 'Unknown'}</strong></div>
+            <div class="config-item">P1 Judge: <strong>${config.p1_model || 'Unknown'}</strong></div>
+            <div class="config-item">P2 Judge: <strong>${config.p2_model || 'Unknown'}</strong></div>
             <div class="config-item">Test Cases: <strong>${config.num_test_cases || '—'}</strong></div>
             <div class="config-item">Pass Threshold: <strong>${config.pass_threshold || 0.65}</strong></div>
             <div class="config-item">Concurrency: <strong>${config.max_concurrent_tcs || 1}</strong></div>
@@ -385,7 +428,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const dimTotals = {};
         const dimCounts = {};
         
-        let passThreshold = currentMetadata?.pass_threshold || 0.65;
+        let passThreshold = currentMetadata?.config?.pass_threshold || currentMetadata?.pass_threshold || 0.65;
         
         data.forEach(tc => {
             const sc = tc.overall_score || 0;
@@ -567,12 +610,19 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // ---- RL SIGNALS ----
-    async function populateRLSignals(runId, data) {
+    async function fetchAndPopulateRLSignals(runId, data) {
         try {
             const res = await fetch(`/api/rl/signals/${runId}`);
             if (!res.ok) return;
             const rlData = await res.json();
-            
+            renderRLSignals(rlData, runId);
+        } catch (e) {
+            console.error('fetchAndPopulateRLSignals error:', e);
+        }
+    }
+
+    function renderRLSignals(rlData, runId) {
+        try {
             const exportBtn = document.getElementById('btn-export-rl');
             if (exportBtn) {
                 exportBtn.onclick = () => {
@@ -617,9 +667,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div style="display:flex; flex-direction:column; gap:16px;">
                         ${rlData.tc_diagnoses.map(d => `
                             <div class="stat-box" style="border-left: 4px solid var(--danger);">
-                                <strong>${d.tc_id}</strong>
-                                <p style="margin: 8px 0; font-size:0.9rem;">${d.root_cause_summary}</p>
-                                ${d.improvement_actions ? `<ul style="font-size:0.85rem; color:var(--text-secondary)">${d.improvement_actions.map(a => `<li>${a}</li>`).join('')}</ul>` : ''}
+                                <strong>${escapeHtml(d.tc_id)}</strong>
+                                <p style="margin: 8px 0; font-size:0.9rem;">${escapeHtml(d.root_cause_summary)}</p>
+                                ${d.improvement_actions ? `<ul style="font-size:0.85rem; color:var(--text-secondary)">${d.improvement_actions.map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>` : ''}
                             </div>
                         `).join('')}
                     </div>
@@ -636,13 +686,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         ${rlData.taxonomy.map(t => `
                             <div class="stat-box" style="border-left: 4px solid var(--accent-1);">
                                 <div style="display:flex; justify-content:space-between; align-items:center;">
-                                    <strong>${t.issue}</strong>
-                                    <span class="stage-pill ${t.severity === 'critical' ? 'error' : (t.severity === 'high' ? 'warning' : 'done')}">${t.severity}</span>
+                                    <strong>${escapeHtml(t.issue)}</strong>
+                                    <span class="stage-pill ${t.severity === 'critical' ? 'error' : (t.severity === 'high' ? 'warning' : 'done')}">${escapeHtml(t.severity)}</span>
                                 </div>
-                                <p style="margin: 8px 0 4px 0; font-size:0.9rem;">${t.description}</p>
+                                <p style="margin: 8px 0 4px 0; font-size:0.9rem;">${escapeHtml(t.description)}</p>
                                 <div style="font-size:0.85rem; color:var(--text-secondary)">
-                                    <em>Fix: ${t.suggested_fix}</em>
-                                    <br>Frequency: ${t.frequency}
+                                    <em>Fix: ${escapeHtml(t.suggested_fix)}</em>
+                                    <br>Frequency: ${escapeHtml(t.frequency)}
                                 </div>
                             </div>
                         `).join('')}
@@ -675,10 +725,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 `;
             }
-
-
         } catch (e) {
-            console.error('populateRLSignals error:', e);
+            console.error('renderRLSignals error:', e);
         }
     }
 

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import re
+import copy
 from typing import Dict, Any, List, Optional
 from collections import Counter
 
@@ -133,11 +134,11 @@ def _validate_p1_consistency(result: P1Result) -> P1Result:
 def enforce_baseline_dimensions(rubric: Optional[EvalRubric]) -> EvalRubric:
     if not rubric or not rubric.dimensions:
         dims = [
-            BASELINE_DIMENSIONS["fidelity"],
-            BASELINE_DIMENSIONS["ranking"],
-            BASELINE_DIMENSIONS["coverage"],
-            BASELINE_DIMENSIONS["authority"],
-            BASELINE_DIMENSIONS["freshness"],
+            copy.deepcopy(BASELINE_DIMENSIONS["fidelity"]),
+            copy.deepcopy(BASELINE_DIMENSIONS["ranking"]),
+            copy.deepcopy(BASELINE_DIMENSIONS["coverage"]),
+            copy.deepcopy(BASELINE_DIMENSIONS["authority"]),
+            copy.deepcopy(BASELINE_DIMENSIONS["freshness"]),
         ]
         # weights sum to 0.5; normalize to 1.0
         for d in dims:
@@ -169,7 +170,7 @@ def enforce_baseline_dimensions(rubric: Optional[EvalRubric]) -> EvalRubric:
         d.weight = round(d.weight * scale_factor, 3)
 
     for axis in missing_axes:
-        new_dims.append(BASELINE_DIMENSIONS[axis])
+        new_dims.append(copy.deepcopy(BASELINE_DIMENSIONS[axis]))
 
     total = sum(d.weight for d in new_dims)
     if total > 0:
@@ -214,8 +215,8 @@ class Judge:
     def __init__(self, config: EvalConfig, or_pool: OpenRouterClientPool):
         self.config = config
         self.or_pool = or_pool
-        self.judge_model = config.judge_model
-        self.p1_model = getattr(config, "p1_model", "") or config.judge_model
+        self.p1_model = config.p1_model
+        self.p2_model = config.p2_model
         self._judge_cache: Dict[str, EvalResult] = {}
 
     def _parse_json(self, clean_response: str) -> dict:
@@ -339,10 +340,14 @@ One of the scraped results has been given to you. Your job is to produce two thi
    If a field has no evidence, return empty — never infer or fabricate.
 
 GUARDRAILS (non-obvious conventions, apply carefully):
-- temporal_markers: Extract only explicit, specific date references ("Q3 2026", "March 15 2026").
-  Never extract vague temporal language ("recently", "soon", "in the near future").
-- publication_date: The page's own stated publish/update date only. Do NOT infer from dates
-  mentioned in the body text or citations — those are temporal markers, not publication dates.
+- key_claims: Extract a MINIMUM of 5 atomic factual statements per document if the content 
+  supports it. Each claim must be a self-contained sentence with a subject, predicate, and 
+  specific object — never a topic label.
+- temporal_markers: Extract ALL explicit, specific date references from the full body text 
+  (e.g. "Q3 2026", "March 15 2026", "as of 2025-04-01"). Do not restrict to headings. 
+  If you find a date in a table row, a footnote, or a citation, include it.
+- publication_date: If the page has no explicit publish date in metadata, check for 
+  "Last updated:", "Published on:", or date strings adjacent to the byline or article header.
 - detected_language: If content is mixed-language, return "mixed" regardless of which language
   dominates. Do not default to the majority language."""
 
@@ -394,20 +399,46 @@ Output ONLY a JSON object matching this schema exactly:
     {{"description": "<table purpose>", "key_data": "<most important row/data>"}}
   ],
   "content_completeness": "<one of: complete | appears_truncated | partial | navigation_only | error_page>",
-  "content_gaps": ["<any observable gaps or missing sections>"]
+  "content_gaps": [
+    {{"gap": "<what is missing>", "severity": "critical|moderate|minor"}}
+  ],
+  "query_coverage_assessment": {{
+    "answers_query": true,
+    "coverage_level": "<full | partial | tangential | none>",
+    "missing_aspects": ["<what the query asks for that this doc doesn't address>"]
+  }}
 }}"""
 
-        try:
-            resp = await self.or_pool.generate(
-                prompt=user_prompt,
-                model=self.p1_model,
-                temperature=0.0,
-                max_tokens=None,
-                system_prompt=system_prompt,
-                response_format={"type": "json_object"}
-            )
-            data = self._parse_json(resp)
-            if data:
+        max_retries = getattr(self.config, 'judge_max_retries', 2)
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                retry_prefix = ""
+                if attempt > 0 and last_error:
+                    logger.warning(f"[Judge] P1 Agent retrying (attempt {attempt+1}/{max_retries+1}) due to: {last_error}")
+                    retry_prefix = (
+                        f"Your previous response was rejected for this reason: {last_error}\n"
+                        "Try again. Output ONLY a valid JSON object — no markdown, no commentary. \n\n"
+                    )
+                    
+                resp, was_truncated = await self.or_pool.generate(
+                    prompt=retry_prefix + user_prompt,
+                    model=self.p1_model,
+                    temperature=0.0,
+                    max_tokens=None,
+                    system_prompt=system_prompt,
+                    response_format={"type": "json_object"},
+                    providers=self.config.p1_providers
+                )
+                
+                if was_truncated:
+                    logger.warning(f"[Judge] P1 Agent output was truncated for {sr.url}")
+
+                data = self._parse_json(resp)
+                if not data:
+                    last_error = "Response could not be parsed as valid JSON."
+                    continue # Retry on empty data
+                    
                 score = _clamp_score_to_level(data.get("scrape_level", "L3"), float(data.get("scrape_score", 0.5)))
                 res = P1Result(
                     rank=sr.firecrawl_rank,
@@ -440,12 +471,17 @@ Output ONLY a JSON object matching this schema exactly:
                     content_completeness=data.get("content_completeness", "partial"),
                     content_gaps=data.get("content_gaps", []),
                     word_count=word_count,
+                    query_coverage_assessment=data.get("query_coverage_assessment", None),
                     is_fallback=False
                 )
                 return _validate_p1_consistency(res)
-        except Exception as e:
-            logger.warning(f"[Judge] P1 Agent failed for {sr.url}: {e}")
-            fallback.fallback_reason = str(e)
+            except Exception as e:
+                logger.warning(f"[Judge] P1 Agent exception for {sr.url}: {e}")
+                last_error = str(e)
+                # We do not continue here if it's a structural exception that might not resolve,
+                # but since we are wrapping in retry loop, we might as well let it loop.
+                if attempt == max_retries:
+                    fallback.fallback_reason = str(e)
             
         return fallback
 
@@ -492,13 +528,18 @@ Output ONLY a JSON object matching this schema exactly:
                 reasoning="No results scraped"
             )
             
-        avg_score = sum(p.scrape_score for p in p1_results) / len(p1_results)
+        scores = [p.scrape_score for p in p1_results]
+        mean_score = sum(scores) / len(scores)
+        floor_score = min(scores)
+        avg_score = round(0.70 * mean_score + 0.30 * floor_score, 4)
         
         assigned_level = "L1"
         for lvl, (lo, hi) in LEVEL_RANGES.items():
-            if lo <= avg_score <= hi:
+            if lo <= avg_score < hi:
                 assigned_level = lvl
                 break
+        if avg_score >= 1.0:
+            assigned_level = "L5"
                 
         evidence_found = []
         for p in p1_results:
@@ -507,11 +548,20 @@ Output ONLY a JSON object matching this schema exactly:
             else:
                 evidence_found.append(f"Rank {p.rank}: {p.url} — scrape_score={p.scrape_score:.2f}, issues={p.scrape_issues}")
                 
+        checks = []
+        for p in p1_results:
+            status = "MET" if p.scrape_score >= 0.6 else ("PARTIALLY_MET" if p.scrape_score >= 0.3 else "NOT_MET")
+            checks.append(CriteriaCheck(
+                condition=f"URL rank {p.rank}: {p.url}",
+                status=status,
+                evidence=f"score={p.scrape_score:.2f}, issues={p.scrape_issues[:2]}"
+            ))
+                
         return DimensionEval(
             dimension_name=fid_dim.name,
             weight=fid_dim.weight,
             evidence_found=evidence_found,
-            criteria_checklist=[CriteriaCheck(condition=fid_dim.criteria, status="PARTIALLY_MET" if avg_score > 0.4 else "NOT_MET", evidence="Aggregated from P1 agents")],
+            criteria_checklist=checks,
             contrastive_fail_triggered=(avg_score < 0.4),
             contrastive_fail_explanation="Average scrape quality is poor" if avg_score < 0.4 else "",
             assigned_level=assigned_level,
@@ -542,6 +592,11 @@ from reading the evidence, not as a rule to follow mechanically.
 A key signal in each profile: query_relevance_score. A document scoring < 0.3 was assessed
 by the P1 agent as largely irrelevant to the query — weight evidence from such documents
 accordingly when judging coverage and precision dimensions.
+
+When document profiles contain conflicting signals on the same dimension (e.g., one
+document has authority_score=0.9 while another has 0.2), do not average them silently.
+Identify the conflict in step1_evidence_found, state which document you are deferring to
+and why, and reflect the conflict in step4_level_justification.
 
 Output ONLY a valid JSON object in the format below."""
 
@@ -590,63 +645,89 @@ OUTPUT FORMAT:
 }}"""
 
         results = []
-        try:
-            resp = await self.or_pool.generate(
-                prompt=user_prompt,
-                model=self.judge_model,
-                temperature=0.0,
-                max_tokens=None,
-                system_prompt=system_prompt,
-                response_format={"type": "json_object"}
-            )
-            data = self._parse_json(resp)
-            evals = data.get("evaluations", [])
-            for e in evals:
-                dim_name = e.get("dimension_name")
-                dim = next((d for d in dims if d.name == dim_name), None)
-                if not dim:
-                    continue
-                level = e.get("step4_assigned_level", "L3")
-                score = _clamp_score_to_level(level, float(e.get("step5_score", 0.5)))
-                
-                checks = [
-                    CriteriaCheck(
-                        condition=c.get("condition", ""),
-                        status=c.get("status", "PARTIALLY_MET"),
-                        evidence=c.get("evidence", "")
+        max_retries = getattr(self.config, 'judge_max_retries', 2)
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                retry_prefix = ""
+                if attempt > 0 and last_error:
+                    logger.warning(f"[Judge] P2 Judge '{judge_type}' retrying (attempt {attempt+1}/{max_retries+1}) due to: {last_error}")
+                    retry_prefix = (
+                        f"Your previous response was rejected for this reason: {last_error}\n"
+                        "Try again. Output ONLY a valid JSON object — no markdown, no commentary. \n\n"
                     )
-                    for c in e.get("step2_criteria_checklist", [])
-                ]
+
+                resp, was_truncated = await self.or_pool.generate(
+                    prompt=retry_prefix + user_prompt,
+                    model=self.p2_model,
+                    temperature=0.0,
+                    max_tokens=None,
+                    system_prompt=system_prompt,
+                    response_format={"type": "json_object"},
+                    providers=self.config.p2_providers
+                )
                 
-                results.append(DimensionEval(
-                    dimension_name=dim.name,
-                    weight=dim.weight,
-                    evidence_found=e.get("step1_evidence_found", []),
-                    criteria_checklist=checks,
-                    contrastive_fail_triggered=bool(e.get("step3_contrastive_fail_triggered", False)),
-                    contrastive_fail_explanation=e.get("step3_contrastive_fail_explanation", ""),
-                    assigned_level=level,
-                    level_justification=e.get("step4_level_justification", ""),
-                    score=score,
-                    reasoning=e.get("summary_reasoning", "")
-                ))
-        except Exception as ex:
-            logger.warning(f"[Judge] {judge_type} evaluation failed: {ex}")
-            for dim in dims:
-                results.append(DimensionEval(
-                    dimension_name=dim.name,
-                    weight=dim.weight,
-                    evidence_found=["P2 Judge failure"],
-                    criteria_checklist=[],
-                    contrastive_fail_triggered=False,
-                    contrastive_fail_explanation="",
-                    assigned_level="L1",
-                    level_justification="Error",
-                    score=0.0,
-                    reasoning=f"Error in P2 judge: {ex}",
-                    is_fallback=True
-                ))
-        return results
+                if was_truncated:
+                    logger.warning(f"[Judge] P2 Judge '{judge_type}' output was truncated.")
+
+                data = self._parse_json(resp)
+                if not data:
+                    last_error = "Response could not be parsed as valid JSON."
+                    continue
+                    
+                evals = data.get("evaluations", [])
+                for e in evals:
+                    dim_name = e.get("dimension_name")
+                    dim = next((d for d in dims if d.name == dim_name), None)
+                    if not dim:
+                        continue
+                    level = e.get("step4_assigned_level", "L3")
+                    score = _clamp_score_to_level(level, float(e.get("step5_score", 0.5)))
+                    
+                    checks = [
+                        CriteriaCheck(
+                            condition=c.get("condition", ""),
+                            status=c.get("status", "PARTIALLY_MET"),
+                            evidence=c.get("evidence", "")
+                        )
+                        for c in e.get("step2_criteria_checklist", [])
+                    ]
+                    
+                    results.append(DimensionEval(
+                        dimension_name=dim.name,
+                        weight=dim.weight,
+                        evidence_found=e.get("step1_evidence_found", []),
+                        criteria_checklist=checks,
+                        contrastive_fail_triggered=bool(e.get("step3_contrastive_fail_triggered", False)),
+                        contrastive_fail_explanation=e.get("step3_contrastive_fail_explanation", ""),
+                        assigned_level=level,
+                        level_justification=e.get("step4_level_justification", ""),
+                        score=score,
+                        reasoning=e.get("summary_reasoning", "")
+                    ))
+                # Success, break out of retry loop
+                return results
+            except Exception as ex:
+                logger.warning(f"[Judge] {judge_type} evaluation exception: {ex}")
+                last_error = str(ex)
+                if attempt == max_retries:
+                    # After all retries have failed, yield fallbacks
+                    for dim in dims:
+                        results.append(DimensionEval(
+                            dimension_name=dim.name,
+                            weight=dim.weight,
+                            evidence_found=["P2 Judge failure"],
+                            criteria_checklist=[],
+                            contrastive_fail_triggered=False,
+                            contrastive_fail_explanation="",
+                            assigned_level="L1",
+                            level_justification="Error",
+                            score=0.0,
+                            reasoning=f"Error in P2 judge: {ex}",
+                            is_fallback=True
+                        ))
+                    return results
 
     async def _run_p2_ranking(self, p1_results, test_case, dims):
         return await self._run_p2_judge("Ranking", p1_results, test_case, dims)

@@ -209,23 +209,22 @@ The `drain_events()` coroutine inside `run.py` maps internal event types to huma
 |-------|---------|---------|-------------|
 | `firecrawl_keys` | `FIRECRAWL_API_KEY_1` … `_5` | — | Firecrawl API keys (pool) |
 | `openrouter_keys` | `OPENROUTER_KEY_1` … `_5` | — | OpenRouter API keys (pool) |
-| `generator_model` | `GENERATOR_MODEL` | `deepseek/deepseek-v4-pro` | LLM-A model slug |
-| `judge_model` | `JUDGE_MODEL` | `deepseek/deepseek-v4-flash` | LLM-B model slug |
-| `improvement_agent_model` | `IMPROVEMENT_AGENT_MODEL` | `deepseek/deepseek-v4-pro` | LLM-C model slug |
-| `num_test_cases` | `NUM_TEST_CASES` | `30` | Total TCs per run |
-| `search_results_per_query` | — | `5` | Firecrawl search result limit |
-| `scrape_top_n` | — | `5` | Top N results to attempt scraping |
-| `pass_threshold` | `PASS_THRESHOLD` | `0.7` | Minimum overall score to "pass" |
-| `query_cache_similarity_threshold` | `QUERY_CACHE_THRESHOLD` | `0.82` | Cosine similarity to trigger Layer 1 cache hit |
-| `kb_freshness_window_seconds` | `KB_FRESHNESS_WINDOW` | `600` | Layer 2 cache TTL in seconds (10 min) |
+| `generator_model` | `GENERATOR_MODEL` | `minimax/minimax-m3` | LLM-A model slug |
+| `p1_model` | `P1_MODEL` | `deepseek/deepseek-v4-flash` | P1 Judge model slug |
+| `p2_model` | `P2_MODEL` | `deepseek/deepseek-v4-pro` | P2 Judge model slug |
+| `improvement_agent_model` | `IMPROVEMENT_AGENT_MODEL` | `z-ai/glm-5.2` | LLM-C model slug |
+| `num_test_cases` | `NUM_TEST_CASES` | `3` | Total TCs per run |
+| `search_results_per_query` | `SEARCH_RESULTS_PER_QUERY` | `5` | Firecrawl search result limit |
+| `scrape_top_n` | `SCRAPE_TOP_N` | `5` | Top N results to attempt scraping |
+| `pass_threshold` | `PASS_THRESHOLD` | `0.65` | Minimum overall score to "pass" |
+| `query_cache_similarity_threshold` | `QUERY_CACHE_THRESHOLD` | `0.95` | Cosine similarity to trigger Layer 1 cache hit |
+| `kb_freshness_window_seconds` | `KB_FRESHNESS_WINDOW` | `900` | Layer 2 cache TTL in seconds (15 min) |
 | `kb_content_score_threshold` | `KB_CONTENT_SCORE_THRESHOLD` | `0.08` | Minimum RRF score for Layer 2 hit |
-| `coverage_weight` | — | `0.25` | Weight of Coverage in overall score |
-| `ranking_weight` | — | `0.35` | Weight of Ranking in overall score |
-| `scrape_weight` | — | `0.40` | Weight of Scrape Quality in overall score |
 | `max_concurrent_tcs` | `MAX_CONCURRENT_TCS` | `10` | Max parallel TC processing |
-| `generator_providers` | `GENERATOR_PROVIDERS` | `deepseek` | Comma-separated OpenRouter provider order for LLM-A |
-| `judge_providers` | `JUDGE_PROVIDERS` | `wafer,gmicloud,baidu` | Comma-separated OpenRouter provider order for LLM-B |
-| `improvement_agent_providers` | `IMPROVEMENT_AGENT_PROVIDERS` | `deepseek` | Comma-separated OpenRouter provider order for LLM-C |
+| `generator_providers` | `GENERATOR_PROVIDERS` | `parasail,together,deepinfra` | Comma-separated OpenRouter provider order for LLM-A |
+| `p1_providers` | `P1_PROVIDERS` | `baidu,gmicloud,fireworks` | Comma-separated OpenRouter provider order for P1 Judge |
+| `p2_providers` | `P2_PROVIDERS` | `baidu,gmicloud,fireworks` | Comma-separated OpenRouter provider order for P2 Judge |
+| `improvement_agent_providers` | `IMPROVEMENT_AGENT_PROVIDERS` | `streamlake,novita` | Comma-separated OpenRouter provider order for LLM-C |
 
 ---
 
@@ -878,31 +877,10 @@ FIRECRAWL_API_KEY_2=fc-second-key-optional
 OPENROUTER_KEY_1=sk-or-your-key-here
 OPENROUTER_KEY_2=sk-or-second-key-optional
 
-# ─── LLM Model Selection (OpenRouter slugs) ────────────────────────────────
-GENERATOR_MODEL=deepseek/deepseek-v4-pro
-JUDGE_MODEL=deepseek/deepseek-v4-flash
-IMPROVEMENT_AGENT_MODEL=deepseek/deepseek-v4-pro
-
-# ─── Provider Routing (comma-separated, optional) ──────────────────────────
-GENERATOR_PROVIDERS=deepseek
-JUDGE_PROVIDERS=wafer,gmicloud,baidu
-IMPROVEMENT_AGENT_PROVIDERS=deepseek
-
 # ─── Qdrant ────────────────────────────────────────────────────────────────
 QDRANT_URL=https://your-qdrant-cluster.qdrant.io
 QDRANT_API_KEY=your-qdrant-api-key
 QDRANT_COLLECTION_NAME=firecrawl_eval
-
-# ─── Run Settings ──────────────────────────────────────────────────────────
-NUM_TEST_CASES=30
-MAX_CONCURRENT_TCS=10
-PASS_THRESHOLD=0.7
-
-# ─── Cache Settings ────────────────────────────────────────────────────────
-QUERY_CACHE_THRESHOLD=0.82
-KB_FRESHNESS_WINDOW=600
-KB_CONTENT_SCORE_THRESHOLD=0.08
-JUDGE_RESULT_TTL=0
 ```
 
 ---

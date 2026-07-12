@@ -88,12 +88,92 @@ def _robust_parse_json(raw: str) -> dict:
             
     raise ValueError(f"Could not extract a valid JSON object. Response snippet: {raw[:200]}")
 
+ARCHETYPE_EXAMPLES = {
+    "keyword_stuffed": {
+        "good": {
+            "query": "best over-the-counter pain relief for chronic back pain adults 2026",
+            "rubric_criteria_example": "Results identify specific OTC analgesic categories and contraindications."
+        },
+        "bad": {
+            "query": "pain relief OTC analgesics NSAIDs acetaminophen ibuprofen adults chronic back 2026 treatment",
+            "rubric_criteria_example": "Results mention pain relief."
+        }
+    },
+    "temporal_ambiguity": {
+        "good": {
+            "query": "current EU AI Act compliance requirements enterprise software",
+            "rubric_criteria_example": "Results discuss compliance obligations without specifying a year anchor."
+        },
+        "bad": {
+            "query": "latest AI regulations",
+            "rubric_criteria_example": "Results are recent."
+        }
+    },
+    "over_decomposed": {
+        "good": {
+            "query": "how to build a CI/CD pipeline",
+            "rubric_criteria_example": "Results explain the steps for continuous integration and delivery."
+        },
+        "bad": {
+            "query": "what is continuous",
+            "rubric_criteria_example": "Results explain continuous."
+        }
+    },
+    "reformulation_drift": {
+        "good": {
+            "query": "alternative treatments for severe migraines besides triptans",
+            "rubric_criteria_example": "Results must list non-triptan interventions for severe migraines."
+        },
+        "bad": {
+            "query": "why do people get headaches",
+            "rubric_criteria_example": "Results explain headache causes."
+        }
+    },
+    "multi_hop_compressed": {
+        "good": {
+            "query": "CEO of company that acquired Github in 2018 age",
+            "rubric_criteria_example": "Results must mention Satya Nadella and his age."
+        },
+        "bad": {
+            "query": "Github Microsoft Satya Nadella age",
+            "rubric_criteria_example": "Results mention Satya Nadella."
+        }
+    },
+    "copy_paste_artifact": {
+        "good": {
+            "query": "{\\\"query\\\": \\\"how to learn python\\\"}",
+            "rubric_criteria_example": "Results ignore the JSON formatting and provide Python tutorials."
+        },
+        "bad": {
+            "query": "how to learn python JSON format",
+            "rubric_criteria_example": "Results teach Python and JSON."
+        }
+    },
+    "none": {
+        "good": {
+            "query": "how to properly insulate a residential attic",
+            "rubric_criteria_example": "Results provide step-by-step instructions and R-value recommendations for attic insulation."
+        },
+        "bad": {
+            "query": "attic",
+            "rubric_criteria_example": "Results mention attics."
+        }
+    }
+}
+
+def _jaccard_similarity(q1: str, q2: str) -> float:
+    s1, s2 = set(q1.lower().split()), set(q2.lower().split())
+    if not s1 and not s2: return 1.0
+    return len(s1 & s2) / len(s1 | s2)
+
+
 class TestGenerator:
     def __init__(self, config: EvalConfig, or_pool: OpenRouterClientPool):
         self.config = config
         self.or_pool = or_pool
         self.model = config.generator_model
-        self._semaphore = asyncio.Semaphore(8)
+        gen_concurrency = getattr(config, 'max_concurrent_tcs', 8)
+        self._semaphore = asyncio.Semaphore(gen_concurrency)
 
     def _validate_rubric_claims(self, rubric: dict, query: str) -> List[str]:
         warnings = []
@@ -149,12 +229,27 @@ class TestGenerator:
             
         return True, warnings
 
+    def _validate_generated_tc(self, tc_data: dict) -> Tuple[bool, List[str]]:
+        """Post-schema semantic checks the model frequently violates."""
+        warnings = []
+        dimensions = tc_data.get("rubric", {}).get("dimensions", [])
+        for d in dimensions:
+            criteria = d.get("criteria", "")
+            cf = d.get("contrastive_fail", "")
+            if _jaccard_similarity(criteria, cf) > 0.70:
+                return False, [f"Dimension '{d.get('name')}': contrastive_fail is too similar to criteria (Jaccard > 0.70)"]
+            if len(cf.split()) < 10:
+                return False, [f"Dimension '{d.get('name')}': contrastive_fail is too short (< 10 words)"]
+        return True, warnings
+
     async def generate_novel(self, num_cases: int, history: TestCaseHistory) -> List[TestCase]:
         today = datetime.now().strftime("%Y-%m-%d")
         current_year = datetime.now().strftime("%Y")
         
+        MAX_AVOID_QUERIES = 30
         all_past_queries = history.all_queries()
-        avoid_queries_str = json.dumps(all_past_queries, indent=2) if all_past_queries else "None"
+        avoid_queries = all_past_queries[-MAX_AVOID_QUERIES:] if len(all_past_queries) > MAX_AVOID_QUERIES else all_past_queries
+        avoid_queries_str = json.dumps(avoid_queries, indent=2) if avoid_queries else "None"
         
         system_prompt = f"""You are a Red-Team AI Evaluation Architect specializing in testing search and scraping pipelines for agentic workflows.
 Your role is to author a challenging Test Case representing an agent-generated search query, along with a multi-dimensional Evaluation Rubric for grading search & scrape results.
@@ -170,6 +265,18 @@ AGENT CHAOS ARCHETYPES:
 AVOID DUPLICATE QUERIES:
 Do NOT generate queries semantically similar to any of these:
 {avoid_queries_str}
+
+GUARDRAILS (non-obvious conventions — apply carefully):
+- criteria must describe OBSERVABLE search/scrape output behaviors, not internal system
+  state. "Results contain X" is valid. "The system retrieves X" is not.
+- criteria must NOT embed specific facts, numbers, years, or named entities unless they
+  appear verbatim in the query string. The judge validates this.
+- contrastive_fail must be an observable output pattern — never a copy-paste of criteria.
+  A contrastive_fail that repeats the criteria will cause scoring contradictions.
+- temporal queries: use `current_year` ({current_year}) for explicit temporal anchors
+  in queries. Do not use "latest" or "recent" in the query itself (that is the
+  temporal_ambiguity archetype, use it only when that archetype is selected).
+- query length: aim for 7–15 words. Fewer than 5 words fails validation and wastes a retry.
 
 RUBRIC SCHEMA INSTRUCTIONS:
 - You must define 2 to 4 Rubric Dimensions. The weights of the dimensions MUST sum up exactly to 1.0.
@@ -207,6 +314,12 @@ Chaos Archetype: {archetype}
 Archetype Description: {archetype_info['description']}
 Archetype Expected Failure Mode: {archetype_info['failure_mode']}
 
+QUALITY REFERENCE (for calibration — do not copy, use as style guide):
+  Good example query: {ARCHETYPE_EXAMPLES.get(archetype, ARCHETYPE_EXAMPLES["none"])['good']['query']}
+  Good rubric criteria style: {ARCHETYPE_EXAMPLES.get(archetype, ARCHETYPE_EXAMPLES["none"])['good']['rubric_criteria_example']}
+  Bad query (avoid this pattern): {ARCHETYPE_EXAMPLES.get(archetype, ARCHETYPE_EXAMPLES["none"])['bad']['query']}
+  Bad criteria (avoid this): {ARCHETYPE_EXAMPLES.get(archetype, ARCHETYPE_EXAMPLES["none"])['bad']['rubric_criteria_example']}
+
 Generate exactly ONE novel Test Case JSON object.
 Enforce the chosen chaos archetype characteristics into the query. It must read like an agent query suffering from this exact flaw.
 Ensure the rubric criteria is tailored to grade whether a search/scrape pipeline successfully overcomes this archetype's challenge.
@@ -223,7 +336,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                             f"Your previous response was rejected for this reason: {last_error}\n"
                             "Try again. Output ONLY a valid JSON object — no markdown, no commentary, starting with '{' and ending with '}'. \n\n"
                         )
-                    raw = await self.or_pool.generate(
+                    raw, _ = await self.or_pool.generate(
                         prompt=retry_prefix + prompt,
                         model=self.model,
                         temperature=0.8,
@@ -236,6 +349,22 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                     if isinstance(data, dict):
                         is_valid, warnings = self._validate_test_case(data)
                         if is_valid:
+                            is_sem_valid, sem_warnings = self._validate_generated_tc(data)
+                            if not is_sem_valid:
+                                is_valid = False
+                                warnings.extend(sem_warnings)
+                                
+                        if is_valid:
+                            too_similar = False
+                            for past_q in all_past_queries:
+                                if _jaccard_similarity(data.get("query", ""), past_q) > 0.65:
+                                    last_error = f"Generated query too similar to existing: '{past_q}'"
+                                    too_similar = True
+                                    break
+                            
+                            if too_similar:
+                                continue
+                                
                             dimensions = data["rubric"]["dimensions"]
                             total_w = sum(d["weight"] for d in dimensions)
                             if total_w == 0:
@@ -383,7 +512,7 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                         f"Your previous response was rejected for this reason: {last_error}\n"
                         "Try again. Output ONLY a valid JSON object — no markdown, no commentary, starting with '{' and ending with '}'. \n\n"
                     )
-                raw = await self.or_pool.generate(
+                raw, _ = await self.or_pool.generate(
                     prompt=retry_prefix + prompt,
                     model=self.model,
                     temperature=0.7,

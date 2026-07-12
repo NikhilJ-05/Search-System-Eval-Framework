@@ -87,6 +87,10 @@ class FirecrawlClientPool:
                         self._cooldowns[idx] = time.time() + cooldown
                     logger.warning(f"[FirecrawlPool] Rate limited. Cooling slot {idx} for {cooldown}s.")
                     continue
+                if any(str(c) in err_str for c in range(500, 600)) or "timeout" in err_str or "connect" in err_str:
+                    logger.warning(f"[FirecrawlPool] Server error / timeout. Retrying slot {idx}...")
+                    await asyncio.sleep(2)
+                    continue
                 raise
             finally:
                 async with self._lock:

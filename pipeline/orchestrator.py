@@ -67,6 +67,8 @@ class Orchestrator:
         self.live_scrape_quality_labels = []
         self.live_eval_results = []
         self.live_test_cases = []
+        self.total_new_indexed = 0
+        self.total_deduped = 0
 
     def _emit_event(self, event_data: dict):
         q = sse_queue_var.get()
@@ -76,33 +78,44 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Failed to emit SSE event: {e}")
 
-    async def _save_live_run(self, run_id: str, test_cases: list, eval_results: list, tc_diagnoses: list):
+    async def _save_live_run(self, run_id: str, test_cases: list, eval_results: list, tc_diagnoses: list, status="running", finished_at=None, duration_s=0.0, overall_score=0.0):
         import dataclasses
+        run_meta = {
+            "generator_model": self.config.generator_model,
+            "p1_model": self.config.p1_model,
+            "p2_model": self.config.p2_model,
+            "improvement_agent_model": getattr(self.config, "improvement_agent_model", ""),
+            "pass_threshold": self.config.pass_threshold,
+            "dimension_floor": getattr(self.config, "dimension_floor", 0.40),
+            "num_test_cases": self.config.num_test_cases,
+            "duration_s": duration_s,
+        }
         run_payload = {
             "run_id": run_id,
             "test_cases": [dataclasses.asdict(tc) for tc in test_cases],
             "eval_results": [r.to_dict() for r in eval_results],
             "tc_diagnoses": [dataclasses.asdict(d) for d in tc_diagnoses],
-            "status": "running"
+            "status": status,
+            "run_meta": run_meta
         }
+        
+        meta = RunMetadata(
+            run_id=run_id,
+            status=status,
+            overall_score=overall_score,
+            tc_count=self.config.num_test_cases,
+            started_at=getattr(self, 'started_at_iso', None),
+            finished_at=finished_at,
+            duration_s=duration_s
+        )
         
         def _write():
             self.store.write_run_atomic(run_id, run_payload)
+            self.store.write_run_metadata(run_id, meta)
             
         await asyncio.to_thread(_write)
 
-    async def _fetch_previous_urls(self) -> List[str]:
-        """Fetch URLs already indexed in the KB so the generator can avoid them."""
-        try:
-            scroll_res, _ = await self.qdrant.client.scroll(
-                collection_name=self.qdrant.config.qdrant_collection,
-                limit=100,
-                with_payload=True
-            )
-            return list({p.payload.get("url") for p in scroll_res if p.payload and p.payload.get("url")})
-        except Exception as e:
-            logger.debug(f"[Orchestrator] Could not fetch previous URLs from KB: {e}")
-            return []
+
 
     async def _process_tc(
         self,
@@ -125,7 +138,9 @@ class Orchestrator:
                 "difficulty": getattr(tc, "difficulty", "unknown"),
                 "chaos_archetype": getattr(tc, "chaos_archetype", "none")
             })
+            })
             tc_new_entries = []
+            tc_stale_updates = []
 
             # Layer 1: Query Cache
             cached_query, query_dense_vec, query_sparse_vec = await self.retriever.find_similar_query(
@@ -227,7 +242,10 @@ class Orchestrator:
                             logger.info(f"[Pipeline] [{tc.id}] Scraped {res.url}: {status}, {len(md) if md else 0} chars")
                             
                             if md:
-                                tc_new_entries.append((res.url, md, tc.query))
+                                if res.scrape_cache_status == "stale":
+                                    tc_stale_updates.append((res.url, md, tc.query))
+                                else:
+                                    tc_new_entries.append((res.url, md, tc.query))
                                 
                                 if res.scrape_cache_status == "stale":
                                     new_hash = hashlib.sha256(md.encode()).hexdigest()
@@ -246,6 +264,8 @@ class Orchestrator:
                 indexing_task = asyncio.create_task(
                     self.indexer.index_batch_deduped(tc_new_entries)
                 )
+            for url, md, q in tc_stale_updates:
+                self._background_tasks.append(asyncio.create_task(self.indexer.update_existing(url, md, "", q)))
 
             search_results_dict[tc.id] = fc_results
 
@@ -264,7 +284,7 @@ class Orchestrator:
             self._background_tasks.append(task)
 
             # Persist successfully processed test case to the test case history store
-            self.history.append(tc)
+            await self.history.append_async(tc)
 
             for de in eval_res.dimension_evals:
                 self._emit_event({
@@ -304,19 +324,27 @@ class Orchestrator:
             })
 
             if indexing_task is not None:
-                index_stats = await indexing_task
-                logger.info(
-                    f"[Pipeline] [{tc.id}] Indexing complete: "
-                    f"{index_stats.new_indexed} new, {index_stats.deduped} deduped"
-                )
-                self._emit_event({
-                    "type": "indexed",
-                    "tc_id": tc.id,
-                    "chunks": index_stats.total_chunks,
-                    "deduped": index_stats.deduped
-                })
-                return index_stats
+                task_index = asyncio.create_task(self._finalize_indexing(indexing_task, tc.id))
+                self._background_tasks.append(task_index)
             return None
+
+    async def _finalize_indexing(self, indexing_task, tc_id):
+        try:
+            index_stats = await indexing_task
+            logger.info(
+                f"[Pipeline] [{tc_id}] Indexing complete: "
+                f"{index_stats.new_indexed} new, {index_stats.deduped} deduped"
+            )
+            self._emit_event({
+                "type": "indexed",
+                "tc_id": tc_id,
+                "chunks": index_stats.total_chunks,
+                "deduped": index_stats.deduped
+            })
+            self.total_new_indexed += index_stats.new_indexed
+            self.total_deduped += index_stats.deduped
+        except Exception as e:
+            logger.error(f"[Pipeline] [{tc_id}] Indexing failed: {e}")
 
     async def _post_judge_pipeline(self, tc: TestCase, eval_res: EvalResult, search_results: List[FirecrawlSearchResult], run_id: str):
         """Background chain: diagnosis → RL signals → report."""
@@ -352,6 +380,15 @@ class Orchestrator:
                 run_id, tc, eval_res, search_results, diagnosis, self.config.pass_threshold
             )
             
+            # Generate live pattern taxonomy and save RL signals
+            live_patterns = self.signal_gen.aggregate_patterns(
+                self.live_micro_patterns, self.live_eval_results, self.live_test_cases
+            )
+            
+            # Fetch kb stats live
+            qdrant_stats = await self.qdrant.get_collection_stats()
+            tc_count = self.history.count()
+            
             # Step 4: Emit SSE + save live state
             self._emit_event({
                 "type": "tc_diagnosis_complete", 
@@ -368,6 +405,24 @@ class Orchestrator:
             self.live_eval_results = [r for r in self.live_eval_results if r.test_case_id != eval_res.test_case_id] + [eval_res]
             await self._save_live_run(run_id, self.live_test_cases, self.live_eval_results, self.live_tc_diagnoses)
             
+            self._emit_event({
+                "type": "state_update",
+                "eval_results": [r.to_dict() for r in self.live_eval_results],
+                "rl_signals": {
+                    "dpo_pairs": [dataclasses.asdict(x) for x in self.live_dpo_pairs],
+                    "reward_signals": [dataclasses.asdict(x) for x in self.live_reward_signals],
+                    "taxonomy": [dataclasses.asdict(p) if dataclasses.is_dataclass(p) else p for p in live_patterns],
+                    "tc_diagnoses": [dataclasses.asdict(d) for d in self.live_tc_diagnoses]
+                },
+                "kb_stats": {
+                    "points_count": qdrant_stats.get("points_count", 0),
+                    "vectors_count": qdrant_stats.get("vectors_count", 0),
+                    "unique_urls": self.total_new_indexed,
+                    "deduped_count": self.total_deduped,
+                    "status": qdrant_stats.get("status", "ok")
+                }
+            })
+            
         except Exception as e:
             logger.error(f"Post-judge pipeline failed for TC {tc.id}: {e}")
 
@@ -377,12 +432,13 @@ class Orchestrator:
             
         logger.info(f"Starting pipeline run: {run_id}")
         start_time = time.time()
+        self.started_at_iso = datetime.now().isoformat()
         
         # Write initial metadata
         initial_meta = RunMetadata(
             run_id=run_id,
             status="running",
-            started_at=datetime.now().isoformat(),
+            started_at=self.started_at_iso,
             tc_count=self.config.num_test_cases
         )
         self.store.write_run_metadata(run_id, initial_meta)
@@ -401,7 +457,8 @@ class Orchestrator:
             "config_snapshot": {
                 "num_tcs": self.config.num_test_cases,
                 "generator_model": self.config.generator_model,
-                "judge_model": self.config.judge_model,
+                "p1_model": self.config.p1_model,
+                "p2_model": self.config.p2_model,
                 "pass_threshold": self.config.pass_threshold
             }
         })
@@ -596,7 +653,8 @@ class Orchestrator:
             duration_s = time.time() - start_time
             run_meta = {
                 "generator_model": self.config.generator_model,
-                "judge_model": self.config.judge_model,
+                "p1_model": self.config.p1_model,
+                "p2_model": self.config.p2_model,
                 "improvement_agent_model": getattr(self.config, "improvement_agent_model", ""),
                 "pass_threshold": self.config.pass_threshold,
                 "dimension_floor": getattr(self.config, "dimension_floor", 0.40),
@@ -630,7 +688,8 @@ class Orchestrator:
                 "regression": reg_data,
                 "report_path": report_path,
                 "tc_report_paths": tc_report_paths,
-                "status": "completed"
+                "status": "completed",
+                "run_meta": run_meta
             }
             
             # duration_s was already calculated above

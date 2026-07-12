@@ -3,6 +3,7 @@ import json
 import math
 import os
 import asyncio
+import re
 from typing import List, Any, Optional, Dict
 from models.eval_result import EvalResult, FirecrawlSearchResult
 from models.rl_signal import (
@@ -222,10 +223,16 @@ class SignalGenerator:
             if not getattr(de, "contrastive_fail_triggered", False):
                 continue
                 
-            # Find bad URL: top ranked URL from firecrawl_ranking that matches bad state
             fc_urls = [p.get("url") for p in eval_result.document_profiles] # roughly order
-            if not fc_urls: continue
-            bad_url = fc_urls[0] # simplification: assume top ranked is the bad one triggering it
+            bad_url = None
+            if getattr(de, "evidence_found", None):
+                for ev in de.evidence_found:
+                    match = re.search(r'https?://\S+', ev)
+                    if match:
+                        bad_url = match.group(0).rstrip(',')
+                        break
+            if not bad_url and fc_urls:
+                bad_url = fc_urls[0]  # last resort fallback
             
             # Find good URL: highest quality score
             good_url = None
@@ -373,7 +380,7 @@ class SignalGenerator:
                 key_claims = []
                 if er.document_profiles:
                     for p in er.document_profiles[:3]:
-                        claims = p.get("content", {}).get("key_claims", [])
+                        claims = p.get("key_claims", [])
                         for c in claims:
                             if c not in key_claims:
                                 key_claims.append(c)

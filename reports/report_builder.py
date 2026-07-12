@@ -60,7 +60,8 @@ class ReportBuilder:
             md += "| Setting | Value |\n"
             md += "|---|---|\n"
             md += f"| Generator Model | {run_meta.get('generator_model', '')} |\n"
-            md += f"| Judge Model | {run_meta.get('judge_model', '')} |\n"
+            md += f"| P1 Model (Extraction) | {run_meta.get('p1_model', '')} |\n"
+            md += f"| P2 Model (Reasoning)  | {run_meta.get('p2_model', '')} |\n"
             md += f"| Improvement Agent | {run_meta.get('improvement_agent_model', '')} |\n"
             md += f"| Pass Threshold | {run_meta.get('pass_threshold', 0.65)} (floor: {run_meta.get('dimension_floor', 0.40)}) |\n"
             md += f"| Test Cases | {run_meta.get('num_test_cases', len(eval_results))} |\n"
@@ -143,7 +144,7 @@ class ReportBuilder:
                 if sr.full_markdown: # Only count actually scraped/cached urls
                     total_c += 1
                     intent_validation[intent]["total_c"] += 1
-                    if sr.scrape_cache_status == "hit":
+                    if sr.scrape_cache_status == "kb_semantic_hit":
                         c_hits += 1
                         intent_validation[intent]["c_hits"] += 1
                         
@@ -184,7 +185,7 @@ class ReportBuilder:
                 profiles = getattr(res, 'document_profiles', [])
                 ideal_urls = [p.get('url', '') for p in sorted(
                     profiles,
-                    key=lambda p: len(p.get('content', {}).get('key_claims', [])),
+                    key=lambda p: len(p.get('key_claims', [])),
                     reverse=True
                 )] if profiles else fc_urls  # fallback to fc order if no profiles
 
@@ -199,8 +200,6 @@ class ReportBuilder:
             avg_fc_o3 = sum(fc_o3)/len(fc_o3) if fc_o3 else 0
             avg_kb_o3 = sum(kb_o3)/len(kb_o3) if kb_o3 else 0
             
-            avg_fc_o5 = sum([comp["fc_vs_ideal"].get("overlap_at_5", 0) for comp in [comparator.compare(fc_urls, ideal_urls, kb_urls)] if True]) / len(fc_taus) if fc_taus else 0
-            # Need to recalculate correctly:
             fc_o5, kb_o5 = [], []
             kb_outperforms = []
             for res in eval_results:
@@ -210,7 +209,7 @@ class ReportBuilder:
                 profiles = getattr(res, 'document_profiles', [])
                 ideal_urls = [p.get('url', '') for p in sorted(
                     profiles,
-                    key=lambda p: len(p.get('content', {}).get('key_claims', [])),
+                    key=lambda p: len(p.get('key_claims', [])),
                     reverse=True
                 )] if profiles else fc_urls
                 comp = comparator.compare(fc_urls, ideal_urls, kb_urls)
@@ -222,9 +221,12 @@ class ReportBuilder:
             avg_kb_o5 = sum(kb_o5)/len(kb_o5) if kb_o5 else 0
             kb_win_rate = (sum(1 for x in kb_outperforms if x) / len(kb_outperforms)) * 100 if kb_outperforms else 0
 
+            avg_fc_tau_display = (avg_fc_tau + 1) / 2
+            avg_kb_tau_display = (avg_kb_tau + 1) / 2
+
             md += "| Metric | Firecrawl | Internal KB | Winner |\n"
             md += "|--------|-----------|-------------|--------|\n"
-            md += f"| Kendall's τ (vs Ideal) | {avg_fc_tau:.3f} | {avg_kb_tau:.3f} | {'KB 🏆' if avg_kb_tau > avg_fc_tau else 'Firecrawl 🏆'} |\n"
+            md += f"| Kendall's τ (vs Ideal, normalized 0→1) | {avg_fc_tau_display:.3f} | {avg_kb_tau_display:.3f} | {'KB 🏆' if avg_kb_tau > avg_fc_tau else 'Firecrawl 🏆'} |\n"
             md += f"| Overlap@3 (vs Ideal) | {avg_fc_o3:.3f} | {avg_kb_o3:.3f} | {'KB 🏆' if avg_kb_o3 > avg_fc_o3 else 'Firecrawl 🏆'} |\n"
             md += f"| Overlap@5 (vs Ideal) | {avg_fc_o5:.3f} | {avg_kb_o5:.3f} | {'KB 🏆' if avg_kb_o5 > avg_fc_o5 else 'Firecrawl 🏆'} |\n"
             md += f"| KB Outperforms FC | - | - | {kb_win_rate:.1f}% of TCs |\n\n"
