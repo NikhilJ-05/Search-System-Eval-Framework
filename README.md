@@ -804,7 +804,11 @@ python run.py --cli --cases 5
 
 ### Live Pipeline Tab
 
-![Live Pipeline](screenshots_new/live_pipeline_streaming.png)
+![Live Pipeline — Run configuration panel](screenshots_new/live_pipeline_config.png)
+
+Before streaming begins, the run configuration panel shows the active model selections, pass threshold, dimension floor, and number of test cases for the current run.
+
+![Live Pipeline — SSE event stream with live leaderboard](screenshots_new/live_pipeline_streaming.png)
 
 The left panel shows a real-time SSE event timeline: TC generation, search results, scrape completions, P1/P2 scoring, and diagnosis events stream in chronologically. The right panel shows the live leaderboard — TC IDs and their overall scores as they complete, updated in real time.
 

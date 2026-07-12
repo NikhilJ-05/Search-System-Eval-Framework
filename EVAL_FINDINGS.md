@@ -53,6 +53,8 @@
 | **Qdrant Collection** | `firecrawl_eval` |
 | **Run Output** | `outputs/runs/run_20260712_180951/` |
 
+![Run configuration panel — model selections, thresholds, and TC count](./screenshots_new/live_pipeline_config.png)
+
 ---
 
 ## Architecture Context
@@ -135,6 +137,8 @@ Despite the 0% pass rate, scores are broadly distributed. 7 TCs scored ≥ 0.80 
 ## Dimension Performance Breakdown
 
 ![Overview Gauge Rings — Dimension scores per run](./screenshots_new/overview_rings.png)
+
+![Rubric Dimensions Tab — dynamic per-TC dimension cards](./screenshots_new/dimensions_tab.png)
 
 The dynamic rubric system produced 50+ unique dimension names across the 30 TCs. The table below shows all dimensions that appeared, sorted by average score ascending (worst first).
 
