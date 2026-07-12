@@ -1,0 +1,38 @@
+[
+  {
+    "issue": "scrape_score_inversion",
+    "frequency": "33%",
+    "description": "Complete documents with content_completeness='complete' and word_count > 500 receive scrape_score=0.20 (L1) while truncated fragments with word_count < 50 receive scrape_score=0.60-0.79. This inversion is systematic across 10 of 30 TCs and is the single largest contributor to _baseline_fidelity failures.",
+    "suggested_fix": "Replace hardcoded 0.20 floor with content-based scoring: complete + word_count > 500 \u2192 base 0.85; truncated \u2192 base 0.40; error_page \u2192 0.10. Add sanity assertion preventing inversion."
+  },
+  {
+    "issue": "thin_social_media_ranking",
+    "frequency": "43%",
+    "description": "Social media posts (Reddit, Facebook, Instagram) with word_count < 50, authority < 0.3, and failed scrapes (has_content=false) systematically occupy top-3 ranking positions above comprehensive authoritative sources with word_count > 1000 and authority > 0.6. The ranking model lacks a content-density floor and does not penalize failed scrapes.",
+    "suggested_fix": "Apply 0.5x ranking penalty when word_count < 100 AND authority < 0.3; exclude results with has_content=false from ranking entirely; add domain-type penalty for social media domains with relevance < 0.7."
+  },
+  {
+    "issue": "multi_hop_decomposition_failure",
+    "frequency": "13%",
+    "description": "Queries requiring multi-hop reasoning (identify entity \u2192 retrieve entity-specific data \u2192 extract quantitative values) are treated as single-hop lookups. The retrieval pipeline returns documents satisfying only the first hop, leaving subsequent hops completely uncovered. This pattern affects all data_extraction and comparative_research queries with multi-hop structure.",
+    "suggested_fix": "Implement query decomposition layer that splits multi-hop queries into sub-queries per hop, retrieves independently, then merges and re-ranks with cross-hop coverage signal. For data_extraction queries, use hop-1 entity as seed for second-stage retrieval."
+  },
+  {
+    "issue": "error_page_rank_poisoning",
+    "frequency": "17%",
+    "description": "Error pages (OSTI 500 error, ScienceDirect captcha, Quora 'Something went wrong'), empty scrapes (has_content=false, content_length=0), and navigation-only captures (nav_link_ratio > 0.7) are not filtered from result sets and occupy ranking positions above legitimate content. These results have authority=0.0 and relevance=0.0 yet appear at ranks 1-5.",
+    "suggested_fix": "Add post-scrape filter: remove results with content_completeness in ['error_page', 'navigation_only'] OR has_content=false OR word_count < 100 with nav_link_ratio > 0.8. Backfill from cached fallback list."
+  },
+  {
+    "issue": "intent_erosion_over_decomposition",
+    "frequency": "10%",
+    "description": "Comparative research queries are decomposed into narrow entity-specific tokens, losing the cross-entity comparison intent. The pipeline retrieves only single-entity results (e.g., NBA-only pages for a sports streaming comparison query) with zero comparative context, causing comparative_context_recovery to score at L1 (0.05-0.25).",
+    "suggested_fix": "Add intent-classification pre-pass that detects comparative_research intent and injects competitor entity terms into the search query before retrieval, ensuring at least 2 results from different entities appear in the candidate pool."
+  },
+  {
+    "issue": "paywalled_academic_content_pollution",
+    "frequency": "10%",
+    "description": "Academic publisher pages behind paywalls (ScienceDirect, AJC Online) return navigation-only content when scraped, yet their high domain authority causes them to rank above complete open-access sources. The scraper does not detect paywall blocks and the ranking model does not penalize navigation-only captures.",
+    "suggested_fix": "Detect paywall signatures (nav_link_ratio > 0.7, word_count < 200, presence of 'Subscribe' or 'Purchase PDF' buttons) and either trigger a headless-browser re-scrape or demote the result below complete open-access alternatives."
+  }
+]

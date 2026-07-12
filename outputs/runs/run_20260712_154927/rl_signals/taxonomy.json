@@ -1,0 +1,32 @@
+[
+  {
+    "issue": "empty_scrape_rank_inflation",
+    "frequency": "33%",
+    "description": "Pages with placeholder or navigation-only content (content_length < 100, e.g., 'Loading\\n\\nPlease wait') occupy top-3 ranking positions, displacing highly relevant results. The ranking function has no scrape-quality awareness.",
+    "suggested_fix": "Add post-scrape content_length and scrape_score checks as ranking signals; demote results with content_length < 100 or scrape_score <= 0.2 below all results with scrape_score > 0.3."
+  },
+  {
+    "issue": "authority_overrides_relevance",
+    "frequency": "67%",
+    "description": "High-authority domains (CDC, IDSA with authority=1.0) outrank semantically superior results (UC Davis, ERS with relevance=0.9+) when their query_relevance is 0.1 or below. The additive ranking formula allows authority to compensate for near-zero relevance.",
+    "suggested_fix": "Switch to multiplicative ranking (relevance \u00d7 authority) or add a relevance floor gate: if query_relevance < 0.3, cap final score at 50% of top candidate's score."
+  },
+  {
+    "issue": "scrape_score_floor_bug",
+    "frequency": "100%",
+    "description": "Pages with confirmed complete extraction (content_completeness='complete', reasoning confirms faithful reproduction) receive scrape_score=0.20 instead of a passing score, systematically deflating _baseline_fidelity to L2 across all TCs.",
+    "suggested_fix": "Audit scrape_score calculation for normalization bug; add unit test asserting scrape_score >= 0.7 when content_completeness='complete' and scrape_issues is empty."
+  },
+  {
+    "issue": "geographic_intent_misresolution",
+    "frequency": "33%",
+    "description": "Queries with explicit geographic destination ('entering Japan') surface origin-country government pages (cbp.gov) at rank 1, because keyword matching on 'customs' and 'duty-free' overrides geographic scope detection.",
+    "suggested_fix": "Add geographic intent classifier that detects destination country and applies TLD-based boosting (.jp) plus origin-country government domain penalty for foreign-destination queries."
+  },
+  {
+    "issue": "boilerplate_leakage",
+    "frequency": "100%",
+    "description": "Government website banners ('Official websites use .gov'), accessibility skip-links ('[Skip to main content]'), cookie notices, and social share buttons leak into scraped markdown, depressing fidelity scores and polluting content signals.",
+    "suggested_fix": "Expand boilerplate blocklist with regex patterns for common gov/medical site boilerplate; add per-site main-content-container extraction rules for cdc.gov, ncbi.nlm.nih.gov, uptodate.com."
+  }
+]

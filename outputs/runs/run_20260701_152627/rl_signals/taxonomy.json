@@ -1,0 +1,20 @@
+[
+  {
+    "issue": "recency_inadequacy",
+    "frequency": "~10%",
+    "description": "Temporal queries (e.g., containing '2026', a specific month) sometimes retrieve and rank outdated content (from 2025) higher than current content.",
+    "suggested_fix": "Extract publication dates from pages and apply a recency-decay signal that strongly boosts content matching the queried year/month."
+  },
+  {
+    "issue": "authority_underweight",
+    "frequency": "~30%",
+    "description": "Official domains (.gov, .edu, organization-specific) are frequently outranked by news aggregators, forums, and social media for factual and data extraction intents, even when the query explicitly names the source.",
+    "suggested_fix": "Include domain-authority embeddings and fine-tune the ranking loss to penalize low-authority results when the user intent is factual or data-driven."
+  },
+  {
+    "issue": "dynamic_table_extraction_failure",
+    "frequency": "high",
+    "description": "Data tables rendered via JavaScript are systematically missed, leading to missing structured content and degraded scores.",
+    "suggested_fix": "Train a classifier to predict when a page contains JavaScript\u2011dependent tables; for such pages, automatically invoke a headless browser rendering step before extraction."
+  }
+]

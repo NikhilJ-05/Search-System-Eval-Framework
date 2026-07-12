@@ -1,0 +1,32 @@
+[
+  {
+    "issue": "empty_content_ranking_inflation",
+    "frequency": "67% (2/3 TCs)",
+    "description": "Results with 0-20 characters of scraped content (Facebook: 0 chars, UpToDate: 20 chars) are ranked in positions 1-2, indicating the ranking pipeline does not incorporate content-availability as a signal. Broken results should be filtered or heavily penalized before RRF fusion.",
+    "suggested_fix": "Add a post-scrape content-availability gate: results with <50 chars body text or placeholder-pattern matches are excluded from ranking or receive a 0.1x penalty multiplier."
+  },
+  {
+    "issue": "authority_relevance_disjoint",
+    "frequency": "100% (3/3 TCs)",
+    "description": "In every TC, at least one low-authority or query-irrelevant source outranks a high-relevance source. Facebook (auth=0.2) above Cornell (rel=0.95); CDC child ADHD (rel=0.2) above ScienceDirect (rel=0.95); IDSA acute COVID (rel=0.0) above ERS long COVID (rel=1.0). The ranking signal does not combine authority and relevance into a composite.",
+    "suggested_fix": "Implement final_score = authority_score \u00d7 0.4 + query_relevance_score \u00d7 0.4 + content_quality_score \u00d7 0.2 as a re-ranking step."
+  },
+  {
+    "issue": "snippet_collision_mirror_inversion",
+    "frequency": "33% (1/3 TCs)",
+    "description": "When a low-authority page mirrors the snippet of a high-authority page (Facebook copying Harvard's 'Strict AI Policies' text), the ranker treats both as equally relevant and may place the mirror first due to tie-breaking by recency or other secondary signals.",
+    "suggested_fix": "Compute MinHash/SimHash fingerprints of snippets; collapse >85% similar results keeping only the highest-authority source."
+  },
+  {
+    "issue": "js_paywall_content_loss",
+    "frequency": "33% (1/3 TCs, 2 URLs)",
+    "description": "JS-rendered pages (UpToDate) return loading placeholders and PDF-locked academic pages (ERS) return only abstracts. These are often the most content-rich sources for medical queries, so their loss disproportionately impacts content_specificity and diagnostic_criteria_coverage.",
+    "suggested_fix": "Two-stage scrape: (1) detect <200 chars or placeholder patterns \u2192 retry with headless browser, (2) detect PDF links on academic domains \u2192 invoke PyMuPDF parser."
+  },
+  {
+    "issue": "duplicate_dimension_scale_inversion",
+    "frequency": "100% (3/3 TCs)",
+    "description": "A duplicate _baseline_fidelity dimension inverts the scrape_score scale (L1=best interpreted as 0.2/1.0=worst), creating false contrastive_fail flags and deflating fidelity scores by ~0.3 points across all TCs.",
+    "suggested_fix": "Remove duplicate dimension instance; add scale-mapping guard converting scrape_level to normalized 0-1 quality score before averaging."
+  }
+]

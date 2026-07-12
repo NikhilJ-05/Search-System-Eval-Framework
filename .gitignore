@@ -34,7 +34,6 @@ env.bak/
 venv.bak/
 
 # ─── Dynamic Pipeline Outputs & Run Logs ───────────────────────────────────
-outputs/runs/*
 !outputs/runs/.gitkeep
 *.log
 *.log.*

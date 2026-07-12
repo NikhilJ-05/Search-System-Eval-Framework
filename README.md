@@ -1,1009 +1,944 @@
-# Firecrawl Eval Showcase
+# EvalOS Framework
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg)](./LICENSE)
+> **A multi-agent evaluation framework for agentic search systems** — designed to continuously measure, diagnose, and generate training signals for production search pipelines like Firecrawl.
 
-> A fully automated, LLM-powered evaluation pipeline for benchmarking Firecrawl's search & scrape quality. It generates adversarial test cases, executes them through a live Firecrawl + Knowledge Base pipeline, judges results across three dimensions, emits RL training signals, and produces a rich per-run report — all with a real-time web dashboard.
+EvalOS closes the feedback loop between search output quality and model improvement. It does this through a fully automated pipeline: dynamically generated adversarial test cases → P1/P2 multi-agent judging → structured RL training signal export → cross-run improvement analysis. Every component is observable through a real-time web dashboard.
 
----
-
-![Full dashboard in completed-run state showing all panels](./screenshots/dashboard_overview.png)
+![EvalOS Live Pipeline](screenshots_new/live_pipeline_streaming.png)
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#system-overview)
-2. [Architecture Diagram](#architecture-diagram)
+2. [Architecture](#architecture)
 3. [Core Design Principles](#core-design-principles)
-4. [Module Reference](#module-reference)
-   - [Entry Point: `run.py`](#entry-point-runpy)
-   - [Configuration: `config.py`](#configuration-configpy)
-   - [Web Dashboard: `app.py`](#web-dashboard-apppy)
-   - [Agent 1 — Test Generator: `eval/test_generator.py`](#agent-1--test-generator-evaltest_generatorpy)
-   - [Agent 2 — LLM Judge: `eval/judge.py`](#agent-2--llm-judge-evaljudgepy)
-   - [Agent 3 — Improvement Agent: `eval/improvement_agent.py`](#agent-3--improvement-agent-evalimprovement_agentpy)
-   - [Calibration: `eval/calibration.py`](#calibration-evalcalibrationpy)
-   - [Pipeline Orchestrator: `pipeline/orchestrator.py`](#pipeline-orchestrator-pipelineorchestratorpy)
-   - [Firecrawl Client Pool: `clients/firecrawl_client.py`](#firecrawl-client-pool-clientsfirecrawl_clientpy)
-   - [OpenRouter Client Pool: `clients/openrouter.py`](#openrouter-client-pool-clientsopenrouterpy)
-   - [Embedder: `clients/embedder.py`](#embedder-clientsembedderpy)
-   - [Qdrant Store: `search_ir/qdrant_store.py`](#qdrant-store-search_irqdrant_storepy)
-   - [Indexer: `search_ir/indexer.py`](#indexer-search_irindexerpy)
-   - [Retriever: `search_ir/retriever.py`](#retriever-search_irretrieverpy)
-   - [RL Signal Generator: `rl/signal_generator.py`](#rl-signal-generator-rlsignal_generatorpy)
-   - [Report Builder: `reports/report_builder.py`](#report-builder-reportsreport_builderpy)
-5. [Data Models](#data-models)
-6. [The Two-Layer Cache System](#the-two-layer-cache-system)
-7. [Scoring System](#scoring-system)
-8. [RL Signal Generation](#rl-signal-generation)
-9. [Pipeline Execution Flow (Step-by-Step)](#pipeline-execution-flow-step-by-step)
-10. [Output Directory Structure](#output-directory-structure)
-11. [Setup & Installation](#setup--installation)
-12. [Configuration Reference (`.env`)](#configuration-reference-env)
-13. [Running the Pipeline](#running-the-pipeline)
-14. [Web Dashboard API](#web-dashboard-api)
-15. [Extending the System](#extending-the-system)
-16. [License](#license)
+4. [Pipeline Execution Flow](#pipeline-execution-flow)
+5. [Module Reference](#module-reference)
+   - [Entry Point — `run.py`](#entry-point--runpy)
+   - [Configuration — `config.py`](#configuration--configpy)
+   - [Web Dashboard — `app.py`](#web-dashboard--apppy)
+   - [Agent 1 — Test Generator](#agent-1--test-generator-evaltestgeneratorpy)
+   - [Agent 2 — P1/P2 Multi-Agent Judge](#agent-2--p1p2-multi-agent-judge-evaljudgepy)
+   - [Agent 3 — Improvement Agent](#agent-3--improvement-agent-evalimprovement_agentpy)
+   - [Scoring System](#scoring-system)
+   - [RL Signal Generation](#rl-signal-generation)
+   - [Knowledge Base — Qdrant + BGE-M3](#knowledge-base--qdrant--bge-m3)
+   - [Regression Detection](#regression-detection)
+   - [Ranking Comparator](#ranking-comparator)
+6. [Data Models](#data-models)
+7. [Output Structure](#output-structure)
+8. [Configuration Reference](#configuration-reference)
+9. [Running the Pipeline](#running-the-pipeline)
+10. [Dashboard Walkthrough](#dashboard-walkthrough)
+11. [Extending the System](#extending-the-system)
+12. [Known Issues & Planned Improvements](#known-issues--planned-improvements)
 
 ---
 
 ## System Overview
 
-This project is an **end-to-end evaluation harness** for the [Firecrawl](https://firecrawl.dev) search and scrape API. It answers the question:
+EvalOS evaluates a **search + scrape pipeline** (specifically Firecrawl) from the perspective of an agentic AI system that relies on it for retrieval. Queries are not simple user questions — they are intentionally adversarial queries modelled after real failure patterns that agentic systems produce when searching the web.
 
-> *"How well does Firecrawl actually find, rank, and extract content for a diverse set of realistic web queries?"*
+Each evaluation run:
 
-The pipeline operates in a continuous **round-based loop**:
+1. **Generates** N test cases, each with its own bespoke scoring rubric and an assigned chaos archetype
+2. **Fires** each query at the Firecrawl search and scrape API
+3. **Evaluates** the results through a two-tier multi-agent judge (P1 per-document profiling, then P2 dimension scoring)
+4. **Diagnoses** each test case for root causes, generates per-URL quality annotations, and proposes query reformulations
+5. **Exports** 7 types of RL training signals derived from the evaluation
+6. **Synthesizes** cross-run improvement proposals through a Level-2 Improvement Agent
+7. **Detects** regressions against prior runs and builds a full run report
 
-```
-[Round N]
-  ├── Generate N adversarial test cases (LLM-A / TestGenerator)
-  ├── For each test case:
-  │     ├── Layer 1 Cache: check if query was seen before (vector similarity)
-  │     ├── Firecrawl Search → top-5 results
-  │     ├── Layer 2 Cache: for each URL, hybrid-search KB for existing content
-  │     ├── Scrape missing URLs via Firecrawl API
-  │     ├── Background-index new content into Qdrant (BGE-M3 dense + sparse)
-  │     ├── Judge (LLM-B): evaluate Coverage, Ranking, Scrape Quality concurrently
-  │     └── Improvement Agent (LLM-C): per-TC root-cause diagnosis
-  └── After all rounds:
-        ├── Full Retrieval Comparison (Firecrawl rank vs KB rank vs Ideal rank)
-        ├── RL Signal Generation (DPO pairs + reward signals)
-        ├── Improvement Agent: cross-run synthesis & roadmap
-        └── Report Builder: markdown report + per-TC reports
-```
+Everything is streamed live to the dashboard via Server-Sent Events. Runs persist to disk and are browsable across sessions.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        run.py / app.py (Entry Points)                   │
-│             CLI mode ──────────────────── Web Dashboard (FastAPI + SSE) │
-└───────────────────────────────┬─────────────────────────────────────────┘
-                                │
-                       ┌────────▼────────┐
-                       │   Orchestrator  │  pipeline/orchestrator.py
-                       │  (Round Loop)   │
-                       └─────┬──────┬───┘
-                             │      │
-              ┌──────────────▼──┐  ┌▼──────────────────┐
-              │  TestGenerator  │  │  FirecrawlClientPool│
-              │   (LLM-A)       │  │  search() + scrape()│
-              │  test_generator │  │  firecrawl_client   │
-              └──────────────┬──┘  └─────────┬───────────┘
-                             │               │
-                    ┌────────▼───────────────▼──────────────┐
-                    │           Two-Layer Cache              │
-                    │  L1: Query Vector Cache (Qdrant)       │
-                    │  L2: KB Hybrid Content Cache (Qdrant)  │
-                    └────────────────────┬──────────────────┘
-                                         │
-                    ┌────────────────────▼──────────────────┐
-                    │           BGE-M3 Embedder              │
-                    │  Dense (1024-dim) + Sparse (BM25-lex)  │
-                    │  clients/embedder.py                   │
-                    └────────────────────┬──────────────────┘
-                                         │
-                    ┌────────────────────▼──────────────────┐
-                    │         Qdrant (AsyncQdrantClient)     │
-                    │  Collections:                          │
-                    │   · firecrawl_eval  (content KB)       │
-                    │   · firecrawl_query_cache              │
-                    │  search_ir/qdrant_store.py             │
-                    │  search_ir/indexer.py                  │
-                    │  search_ir/retriever.py                │
-                    └────────────────────────────────────────┘
-                                         │
-              ┌──────────────────────────▼─────────────────────────────┐
-              │                   Judge (LLM-B)                        │
-              │  3 concurrent passes: Coverage · Ranking · Scrape      │
-              │  eval/judge.py                                         │
-              └──────────────────────────┬─────────────────────────────┘
-                                         │
-              ┌──────────────────────────▼─────────────────────────────┐
-              │            Improvement Agent (LLM-C)                   │
-              │  Per-TC diagnosis (live) → Cross-run synthesis         │
-              │  eval/improvement_agent.py                             │
-              └──────────────────────────┬─────────────────────────────┘
-                                         │
-     ┌───────────────────────────────────▼────────────────────────────────┐
-     │                        RL Signal Generator                         │
-     │  DPO pairs · Reward signals · Failure taxonomy                     │
-     │  rl/signal_generator.py                                            │
-     └───────────────────────────────────┬────────────────────────────────┘
-                                         │
-     ┌───────────────────────────────────▼────────────────────────────────┐
-     │                         Report Builder                             │
-     │  Executive summary · Retrieval comparison · Roadmap               │
-     │  Per-TC markdown reports                                           │
-     │  reports/report_builder.py                                         │
-     └────────────────────────────────────────────────────────────────────┘
+│                          EvalOS Entry Points                            │
+│                                                                         │
+│   python run.py           (Web mode — FastAPI + auto browser open)      │
+│   python run.py --cli     (CLI mode — full pipeline in terminal)        │
+│   python run.py --cli --cases 5   (Quick smoke test)                    │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │   Orchestrator          │
+                    │   pipeline/orchestrator │
+                    └────────────┬────────────┘
+                                 │
+           ┌─────────────────────┼──────────────────────┐
+           │                     │                      │
+    ┌──────▼──────┐     ┌────────▼────────┐    ┌───────▼───────┐
+    │ TestGenerator│     │  Two-Layer Cache│    │ FirecrawlPool │
+    │ (LLM-A)      │     │                 │    │ search+scrape │
+    │              │     │ L1: Query Cache │    │ round-robin   │
+    │ Novel (65%)  │     │  Qdrant cosine  │    └───────────────┘
+    │ CacheVar(35%)│     │  sim ≥ 0.95     │
+    └──────────────┘     │                 │
+                         │ L2: KB Hybrid   │
+                         │  BM25+Vector    │
+                         │  RRF score≥0.08 │
+                         └────────────────┘
+                                 │
+                    ┌────────────▼──────────────────┐
+                    │   P1/P2 Multi-Agent Judge      │
+                    │                               │
+                    │  ┌─────────────────────────┐  │
+                    │  │ P1 Agent × N (per URL)  │  │
+                    │  │ Document Intelligence   │  │
+                    │  │ Profiler — extracts:    │  │
+                    │  │  · scrape verdict       │  │
+                    │  │  · key claims           │  │
+                    │  │  · named entities       │  │
+                    │  │  · temporal markers     │  │
+                    │  │  · authority signals    │  │
+                    │  │  · structural metrics   │  │
+                    │  └──────────┬──────────────┘  │
+                    │             │ P1Results         │
+                    │  ┌──────────▼──────────────┐  │
+                    │  │ P2 Agents × 5 (per dim  │  │
+                    │  │ family, concurrent)     │  │
+                    │  │  · Ranking              │  │
+                    │  │  · Coverage             │  │
+                    │  │  · Authority            │  │
+                    │  │  · Freshness            │  │
+                    │  │  · Precision            │  │
+                    │  │ + Fidelity (deterministic│  │
+                    │  │   from P1 scrape scores)│  │
+                    │  └─────────────────────────┘  │
+                    └────────────┬──────────────────┘
+                                 │ EvalResult
+           ┌─────────────────────┼────────────────────┐
+           │                     │                    │
+    ┌──────▼──────┐   ┌──────────▼────────┐   ┌──────▼──────┐
+    │ Improvement  │   │ SignalGenerator   │   │ReportBuilder│
+    │ Agent (LLM-C)│   │ 7 RL signal types │   │+ Regression │
+    │ Level 1: TC  │   │                   │   │  Detector   │
+    │ Level 2: Run │   └───────────────────┘   └─────────────┘
+    └──────────────┘
+           │
+    ┌──────▼──────────────────────────────────────┐
+    │  Qdrant + BGE-M3 Knowledge Base             │
+    │  Dense (1024d) + Sparse (BM25-lex) RRF      │
+    │  firecrawl_eval  +  firecrawl_query_cache   │
+    └─────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Core Design Principles
 
-### 1. Rolling Generation (Knowledge Feedback Loop)
-Each round of test case generation receives the full history of:
-- All previous query strings → so the LLM avoids semantic near-duplicates
-- All URLs currently in the Qdrant KB → so novel queries target uncrawled territory
+### 1. Chaos-Driven Generation
+Every test case is assigned a **chaos archetype** that simulates a known failure mode of agentic search systems. This ensures the evaluation covers realistic degradation scenarios, not just clean benchmark queries.
 
-This means as the KB fills up, later test cases are *harder* — they probe domains not yet indexed, exposing fresh weaknesses rather than re-testing what already works.
+### 2. Rubric-First Test Design
+The test generator authors a **custom scoring rubric** for each test case before writing the query. Rubric dimensions (2–4 per TC) define exactly what success and failure look like for that specific query. The judge never uses hardcoded criteria.
 
-### 2. Two-Phase Test Case Strategy
-Every batch is either an **anchor round** (65%) or a **variant round** (35%):
+### 3. Rolling History + Duplicate Avoidance
+Test cases are persisted across runs to a JSONL history file. The generator uses Jaccard similarity (`< 0.65`) to reject near-duplicate queries before they are added, ensuring each run extends coverage rather than repeating it.
 
-| Phase | What it does | Why |
-|-------|-------------|-----|
-| **Anchor** (novel) | Domain-bucket-sampled, adversarial queries from 13 distinct knowledge domains | Ensures broad coverage and domain diversity |
-| **Variant** (cache) | Semantic paraphrases, exact duplicates, or related queries derived from history | Probes the two-layer cache, ensuring cache hits don't silently corrupt results |
+### 4. Cache Variant Testing
+Once sufficient history accumulates (≥ 5 cases), 35% of new test cases are **cache variants** — derived from prior test cases to test how the pipeline handles queries that share a source, intent, or phrasing with a previously cached result.
 
-### 3. Concurrent, Non-Blocking Architecture
-The orchestrator uses `asyncio.gather()` extensively:
-- Firecrawl scrape calls for all top-N URLs fire **in parallel** per test case
-- The judge's three evaluation passes (Coverage, Ranking, Scrape) run **concurrently**
-- Qdrant indexing is fired as a **background task** immediately after scraping, so the LLM judge call and indexing overlap
-- Multiple test cases within a batch run **concurrently**, gated by a `Semaphore` to prevent API overload
+### 5. Two-Layer Content Cache
+The pipeline uses a two-layer cache before calling Firecrawl's scrape API:
+- **L1 (Query Cache)**: A Qdrant vector collection storing search result lists keyed by dense query embedding. Hit threshold: cosine similarity ≥ 0.95, TTL: 1 hour.
+- **L2 (KB Semantic Cache)**: Per-URL hybrid RRF (BM25 + vector) scoring against the content knowledge base. If the query-specific RRF score for a URL exceeds the threshold (default 0.08), the cached full document is returned instead of re-scraping. TTL: 15 minutes (configurable).
 
-### 4. Separation of LLM Roles
-Three distinct LLM models serve three distinct roles, configurable independently:
+### 6. P1/P2 Multi-Agent Judging
+Evaluation is split into two tiers. P1 handles per-document fact extraction. P2 handles holistic dimension scoring against the rubric using P1's structured output. This separation means the reasoning LLM (P2) never has to process raw HTML/markdown — it works entirely from structured profiles.
 
-| Role | Model (default) | Temperature | Purpose |
-|------|----------------|-------------|---------|
-| **Generator (LLM-A)** | `deepseek/deepseek-v4-pro` | 0.8 | Creative adversarial query generation |
-| **Judge (LLM-B)** | `deepseek/deepseek-v4-flash` | 0.1 | Deterministic scoring (Coverage, Ranking, Scrape) |
-| **Improvement Agent (LLM-C)** | `deepseek/deepseek-v4-pro` | 0.1–0.2 | Root-cause analysis and engineering proposals |
+### 7. 5-Step Chain of Thought Scoring
+Every P2 dimension evaluation follows a locked 5-step CoT: evidence collection → criteria checklist → contrastive fail check → level assignment with justification → precise score within level band.
+
+### 8. Hybrid Pass Gate
+A test case only passes if: **overall score ≥ `pass_threshold` AND no dimension scores below `dimension_floor`**. A single critical failure on any dimension fails the test case even if the overall average is acceptable.
+
+### 9. Concurrent Non-Blocking Architecture
+- P1 agents run concurrently per URL (`asyncio.gather`)
+- P2 agents run concurrently per dimension family (`asyncio.gather`)
+- Post-judge pipeline (diagnosis → RL signals → per-TC report) runs as a background task
+- Next TC generation overlaps with current TC execution
+- BGE-M3 embedding is serialized with a semaphore (not thread-safe), but all other I/O is concurrent
+
+---
+
+## Pipeline Execution Flow
+
+```
+for i in range(num_test_cases):
+    ┌─ CONCURRENT ────────────────────────────────────────┐
+    │  Process TC[i]:                                     │
+    │   1. L1 Query Cache lookup (Qdrant vector search)   │
+    │   2. Firecrawl search (on cache miss)               │
+    │   3. L2 KB Hybrid RRF lookup per URL                │
+    │   4. Firecrawl scrape (on KB miss/stale)            │
+    │   5. Background indexing to Qdrant KB               │
+    │   6. P1 Agents × N (concurrent, per URL)            │
+    │   7. P2 Agents × 5 (concurrent, per dim family)     │
+    │   8. Fidelity aggregation (deterministic)           │
+    │   9. EvalResult → live state + dashboard SSE        │
+    │  [Background: Diagnosis → RL signals → TC report]  │
+    │                                                     │
+    │  Generate TC[i+1] (overlapping):                    │
+    │   • LLM-A: domain + archetype + rubric-first query  │
+    └─────────────────────────────────────────────────────┘
+
+After all TCs:
+  → Wait for all background tasks
+  → Aggregate micro-patterns into run-level taxonomy
+  → Improvement Agent Level-2 synthesis
+  → SFT Gold example selection
+  → Save all 7 RL signal files
+  → Retrieval comparison against KB
+  → Judge health check
+  → Regression detection
+  → Full run report
+  → Persist run to disk
+```
 
 ---
 
 ## Module Reference
 
-### Entry Point: `run.py`
+### Entry Point — `run.py`
 
-The single entry point for all pipeline modes.
+Single entry point for all pipeline modes:
 
+```bash
+python run.py                 # Start web dashboard (auto-opens browser at localhost:8000)
+python run.py --cli           # Full pipeline run in terminal
+python run.py --cli --cases 5 # Quick test with only 5 test cases
 ```
-python run.py                     # Launches FastAPI web dashboard on :8000
-python run.py --cli               # Full pipeline run in terminal (no web server)
-python run.py --cli --cases 5     # Quick 5 TC smoke test
-python run.py --calibrate-only    # Run judge calibration pre-flight only
-```
 
-**How it works in `--cli` mode:**
-1. Loads `EvalConfig` from `.env`
-2. Creates an `asyncio.Queue` and wires it to `sse_queue_var` (a `ContextVar`) so the orchestrator can emit SSE-style events that the CLI drains to `stdout`
-3. Calls `Orchestrator.run_pipeline()` inside `asyncio.run()`
-
-The `drain_events()` coroutine inside `run.py` maps internal event types to human-readable log prefixes like `[1/7] Calibration`, `[TC] tc_id "query..."`, `[Judge] cov=0.92 rnk=0.88`.
+In web mode, `run.py` starts a Uvicorn/FastAPI server. The dashboard auto-opens in the default browser after 1.5 seconds. In CLI mode, SSE events are drained to stdout with structured log messages.
 
 ---
 
-### Configuration: `config.py`
+### Configuration — `config.py`
 
-`EvalConfig` is a `@dataclass` loaded entirely from environment variables via `from_env()`.
+All settings are exposed via environment variables (loaded from `.env`). `EvalConfig.from_env()` reads them at startup.
 
-| Field | Env Var | Default | Description |
-|-------|---------|---------|-------------|
-| `firecrawl_keys` | `FIRECRAWL_API_KEY_1` … `_5` | — | Firecrawl API keys (pool) |
-| `openrouter_keys` | `OPENROUTER_KEY_1` … `_5` | — | OpenRouter API keys (pool) |
-| `generator_model` | `GENERATOR_MODEL` | `minimax/minimax-m3` | LLM-A model slug |
-| `p1_model` | `P1_MODEL` | `deepseek/deepseek-v4-flash` | P1 Judge model slug |
-| `p2_model` | `P2_MODEL` | `deepseek/deepseek-v4-pro` | P2 Judge model slug |
-| `improvement_agent_model` | `IMPROVEMENT_AGENT_MODEL` | `z-ai/glm-5.2` | LLM-C model slug |
-| `num_test_cases` | `NUM_TEST_CASES` | `3` | Total TCs per run |
-| `search_results_per_query` | `SEARCH_RESULTS_PER_QUERY` | `5` | Firecrawl search result limit |
-| `scrape_top_n` | `SCRAPE_TOP_N` | `5` | Top N results to attempt scraping |
-| `pass_threshold` | `PASS_THRESHOLD` | `0.65` | Minimum overall score to "pass" |
-| `query_cache_similarity_threshold` | `QUERY_CACHE_THRESHOLD` | `0.95` | Cosine similarity to trigger Layer 1 cache hit |
-| `kb_freshness_window_seconds` | `KB_FRESHNESS_WINDOW` | `900` | Layer 2 cache TTL in seconds (15 min) |
-| `kb_content_score_threshold` | `KB_CONTENT_SCORE_THRESHOLD` | `0.08` | Minimum RRF score for Layer 2 hit |
-| `max_concurrent_tcs` | `MAX_CONCURRENT_TCS` | `10` | Max parallel TC processing |
-| `generator_providers` | `GENERATOR_PROVIDERS` | `parasail,together,deepinfra` | Comma-separated OpenRouter provider order for LLM-A |
-| `p1_providers` | `P1_PROVIDERS` | `baidu,gmicloud,fireworks` | Comma-separated OpenRouter provider order for P1 Judge |
-| `p2_providers` | `P2_PROVIDERS` | `baidu,gmicloud,fireworks` | Comma-separated OpenRouter provider order for P2 Judge |
-| `improvement_agent_providers` | `IMPROVEMENT_AGENT_PROVIDERS` | `streamlake,novita` | Comma-separated OpenRouter provider order for LLM-C |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FIRECRAWL_API_KEY_1` … `_5` | — | Firecrawl API keys (rotated) |
+| `OPENROUTER_KEY_1` … `_5` | — | OpenRouter API keys (rotated via pool) |
+| `QDRANT_URL` | — | Qdrant cluster URL |
+| `QDRANT_API_KEY` | — | Qdrant authentication key |
+| `QDRANT_COLLECTION_NAME` | `firecrawl_eval` | Primary KB collection name |
+| `GENERATOR_MODEL` | `minimax/minimax-m3` | LLM-A: test case generation |
+| `P1_MODEL` | `deepseek/deepseek-v4-flash` | P1: per-document extraction |
+| `P2_MODEL` | `deepseek/deepseek-v4-flash` | P2: dimension scoring |
+| `IMPROVEMENT_AGENT_MODEL` | `z-ai/glm-5.2` | LLM-C: diagnosis + synthesis |
+| `GENERATOR_PROVIDERS` | `Parasail,Together,DeepInfra` | Comma-separated OpenRouter provider order for LLM-A |
+| `P1_PROVIDERS` | `Baidu,GMICloud,Fireworks` | Provider order for P1 agents |
+| `P2_PROVIDERS` | `Baidu,GMICloud,Fireworks` | Provider order for P2 judges |
+| `IMPROVEMENT_AGENT_PROVIDERS` | `StreamLake,Novita` | Provider order for LLM-C |
+| `NUM_TEST_CASES` | `30` | Test cases per run |
+| `SEARCH_RESULTS_PER_QUERY` | `5` | Firecrawl search results per query |
+| `SCRAPE_TOP_N` | `5` | URLs to scrape per query |
+| `PASS_THRESHOLD` | `0.65` | Minimum overall score to pass |
+| `DIMENSION_FLOOR` | `0.40` | No dimension may score below this |
+| `SFT_GOLD_THRESHOLD` | `0.85` | Min score for SFT Gold example selection |
+| `KB_FRESHNESS_WINDOW` | `900` | Seconds before a KB entry is considered stale |
+| `QUERY_CACHE_THRESHOLD` | `0.95` | Cosine similarity threshold for L1 query cache hit |
+| `QUERY_CACHE_EVICTION_MAX_AGE` | `3600` | Seconds before query cache entries are evicted |
+| `KB_CONTENT_SCORE_THRESHOLD` | `0.08` | Min RRF score for L2 KB semantic cache hit |
+| `JUDGE_MAX_RETRIES` | `2` | Retry attempts for P1/P2 agent LLM calls |
+| `LLM_READ_TIMEOUT_S` | `3600` | HTTP read timeout for all LLM calls (seconds) |
+| `CACHE_VARIANT_MIN_HISTORY` | `5` | Minimum history size before cache variants are generated |
+| `ARCHETYPE_WEIGHTS` | See below | Comma-separated `archetype:weight` pairs |
+
+Default archetype weights: `none:0.30, over_decomposed:0.10, keyword_stuffed:0.10, reformulation_drift:0.12, multi_hop_compressed:0.12, temporal_ambiguity:0.13, copy_paste_artifact:0.13`
 
 ---
 
-### Web Dashboard: `app.py`
+### Web Dashboard — `app.py`
 
-A **FastAPI** application with Server-Sent Events (SSE) for real-time pipeline updates.
+A FastAPI server streaming live pipeline events via SSE. The dashboard serves 7 tabs:
 
-![Dashboard with a live run streaming SSE events](./screenshots/dashboard_sse_streaming.png)
+![Dashboard Overview](screenshots_new/overview_rings.png)
 
-#### Key Endpoints
+| Tab | What It Shows |
+|-----|---------------|
+| **Live Pipeline** | Real-time SSE timeline of pipeline events + live leaderboard of TC scores as they complete |
+| **Dimensions** | Dynamic rubric dimension cards for the loaded run — name, weight, criteria, and contrastive fail definition |
+| **Overview** | Per-dimension gauge rings + pass rate, best/worst query, and run duration stats |
+| **Test Cases** | Filterable table with dynamic per-dimension score columns. Click any row to expand the full TC detail |
+| **Report** | Rendered markdown report with download button — includes dimension breakdown, floor failures, cache analytics, and improvement proposals |
+| **RL Signals** | Sub-tabs for DPO Pairs, Taxonomy, Diagnostics, and Reward Signals |
+| **KB Explorer** | Hybrid RRF search against the live Qdrant KB + document/chunk/dedup stats |
+
+**REST API Endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | Serves the single-page dashboard (`static/index.html`) |
-| `POST` | `/api/runs` | Starts a new pipeline run, returns `run_id`. Run executes in `BackgroundTasks` with `asyncio.shield()` to prevent cancellation on client disconnect |
-| `GET` | `/api/runs/{run_id}/stream` | SSE stream of real-time events for a running pipeline |
-| `GET` | `/api/runs/{run_id}` | Full JSON dump of a completed run's results (`run.json`) |
-| `GET` | `/api/runs/{run_id}/report` | The generated `report.md` as JSON `{"markdown": "..."}` |
-| `GET` | `/api/runs/{run_id}/tc_report/{tc_id}` | Per-TC markdown report |
-| `GET` | `/api/kb/search?q=...` | Live semantic search of the knowledge base |
-| `GET` | `/api/kb/stats` | Qdrant collection stats (point count, vector count) |
-| `GET` | `/api/rl/signals/{run_id}` | DPO pairs, reward signals, taxonomy, and improvement analysis for a run |
-
-The SSE stream emits JSON events with a `type` field:
-- `run_start`, `run_complete`, `run_error`
-- `phase_start`, `phase_complete`
-- `test_case_created`, `tc_processing`
-- `firecrawl_search_done`, `firecrawl_scrape_done`
-- `query_cache_hit`, `indexed`
-- `judge_scored`, `round_complete`
-- `ping` (keepalive every 1s timeout)
+| `GET` | `/api/runs` | List all runs with metadata |
+| `GET` | `/api/runs/{run_id}` | Full run payload including dimensions, eval results, and metadata |
+| `GET` | `/api/runs/{run_id}/status` | Lightweight status check (status, overall_score, duration_s) |
+| `GET` | `/api/runs/{run_id}/report` | Raw markdown report text |
+| `GET` | `/api/runs/{run_id}/rl` | RL signals payload |
+| `POST` | `/api/run` | Start a new pipeline run (background task) |
+| `GET` | `/api/events/{run_id}` | SSE event stream for a run |
+| `GET` | `/api/kb/stats` | Knowledge base collection statistics |
+| `POST` | `/api/kb/search` | Hybrid RRF search against the KB |
 
 ---
 
-### Agent 1 — Test Generator: `eval/test_generator.py`
+### Agent 1 — Test Generator (`eval/test_generator.py`)
 
-The **TestGenerator** (LLM-A) is responsible for creating adversarial test cases that stress-test Firecrawl's search and scrape capabilities.
+**What it creates:** One `TestCase` per call, including a bespoke `EvalRubric`.
 
-#### Domain Buckets
+**Model:** `GENERATOR_MODEL` (LLM-A), temperature 0.7
 
-Test cases are sampled from **13 domain buckets**, each with:
-- A `family` identifier (prevents two queries from the same knowledge family in one batch — e.g., only one "tech" query per round)
-- Allowed `structural_categories` (the types of scraping challenges expected)
-- Example queries for few-shot priming
+#### Agent Chaos Archetypes
 
-| Domain | Family | Structural Categories |
-|--------|--------|----------------------|
-| Healthcare & Medical | `health` | structured_data_extraction, pdf_document, long_form_article |
-| Finance & Investing | `finance` | structured_data_extraction, rapidly_changing, paywalled_content |
-| Legal & Regulatory | `legal` | pdf_document, nav_heavy_portal, structured_data_extraction |
-| Travel & Geography | `travel` | structured_data_extraction, dynamic_spa_content, nav_heavy_portal |
-| Science & Academia | `science` | long_form_article, pdf_document, structured_data_extraction |
-| Food & Nutrition | `food` | structured_data_extraction, long_form_article, minimal_content |
-| Sports & Entertainment | `sports` | rapidly_changing, dynamic_spa_content, structured_data_extraction |
-| Education & Academia | `education` | structured_data_extraction, nav_heavy_portal, pdf_document |
-| E-Commerce & Products | `commerce` | structured_data_extraction, nav_heavy_portal, dynamic_spa_content |
-| Government & Public Policy | `government` | pdf_document, nav_heavy_portal, long_form_article |
-| Environment & Climate | `science` | structured_data_extraction, long_form_article, rapidly_changing |
-| History & Humanities | `humanities` | long_form_article, pdf_document, nav_heavy_portal |
-| Technology & Software | `tech` | code_documentation, structured_data_extraction, multi_language |
+Archetypes simulate the specific failure modes that agentic AI systems produce when they issue search queries:
+
+| Archetype | What It Simulates | Expected Failure Mode |
+|-----------|-------------------|-----------------------|
+| `none` | Clean baseline query, no distortion | N/A — establishes the baseline |
+| `over_decomposed` | Agent narrowed or over-simplified the query, losing comparative context | Generic results, misses the compound intent |
+| `keyword_stuffed` | Agent dumped all synonyms and related terms into one query | Relevance diluted; noisy aggregator results dominate |
+| `reformulation_drift` | Query has drifted from the core intent over multiple retries | Increasingly off-topic results ranked first |
+| `multi_hop_compressed` | Multi-step reasoning collapsed into a single query | No single page answers all reasoning hops |
+| `temporal_ambiguity` | Uses "latest", "current", or "recent" without a year anchor | Stale content that appears fresh; misleading publication dates |
+| `copy_paste_artifact` | Leftover JSON keys, tool call parameters, or prompt fragments in the query | Bizarre keyword matches on technical artifacts rather than content |
+
+Archetype sampling is weighted by `archetype_weights` in config (default skews toward temporal, multi-hop, and copy-paste as these produce the most diagnostic signal).
+
+#### Knowledge Domains
+
+16 domains determine the topical area of each generated test case:
+
+Healthcare, Finance, Legal, Travel, Science, Food & Nutrition, Sports, Education, E-Commerce, Government & Policy, Environment, History, Technology, Cybersecurity, Pharmaceuticals, Real Estate
+
+#### Valid Query Intents
+
+| Intent | Description |
+|--------|-------------|
+| `factual_lookup` | Single-answer factual question |
+| `comparative_research` | Comparing multiple options, products, or approaches |
+| `tutorial_howto` | Step-by-step instructions |
+| `data_extraction` | Extracting structured data (tables, lists, numbers) |
+| `navigational` | Finding a specific known page or resource |
+| `exploratory` | Open-ended research without a definitive answer |
+| `real_time` | Time-sensitive current information |
 
 #### Two-Phase Generation
 
-**Phase 1 — Novel Anchors (anchor rounds):**
-- One LLM-A call per selected domain bucket fires **concurrently** (up to 8 at a time via `asyncio.Semaphore(8)`)
-- Each call uses a structured prompt enforcing a strict JSON schema with `must_mention`, `expected_elements`, `noise_risks`, `expected_source_priority`
-- History injection: last 5 queries + up to 10 randomly sampled older queries are provided in the prompt as `AVOID DUPLICATES` context
-- Validation ensures: query ≥ 5 words, ≥ 3 `must_mention` entities, ≥ 2 `expected_elements`, valid `intent` enum
+**Novel cases (65%):** A single LLM-A call generates:
+1. Query (7–15 words, one of 16 domains, one of 7 intents, easy/medium/hard)
+2. Rubric with 2–4 custom dimensions — each with `name`, `weight`, `criteria`, and `contrastive_fail`
+3. `chaos_archetype` (sampled by weight)
 
-**Phase 2 — Cache Variants (variant rounds, ~35% of rounds):**
-- A single LLM-A call generates a batch of variants derived from the reference pool
-- Variant types: `exact_duplicate`, `semantic_near_miss`, `shared_url`, `semantic_far_miss`
-- Purpose: tests that the two-layer cache handles near-duplicate queries correctly without silently returning stale or wrong results
+**Cache variants (35%, once history ≥ 5):** Derived from a prior test case in history. Four relationship types with fixed sampling weights:
 
-#### TestCase Schema
+| Relationship | Weight | What It Tests |
+|---|---|---|
+| `exact_duplicate` | 10% | Trivial cache hit — minimal evaluation signal |
+| `same_source_different_angle` | 35% | Same source material, completely different information angle + rubric |
+| `rephrased_same_intent` | 30% | Natural distinct rephrasing of the parent query |
+| `subset_of_parent` | 25% | Narrower sub-question targeting a specific detail |
 
-```json
-{
-  "id": "tc_a1b2c3d4",
-  "query": "Goldman Sachs top stock picks July 2026 with tickers and price targets",
-  "intent": "factual_lookup",
-  "difficulty": "hard",
-  "category": "paywalled_content",
-  "cache_intent": "novel",
-  "expected_coverage": {
-    "must_mention": ["Goldman_Sachs", "tickers", "price_targets"],
-    "should_mention": ["Wall_Street", "equity_research"],
-    "min_relevant_results": 2
-  },
-  "expected_ranking": {
-    "ranking_signals": ["official_source", "date_freshness"],
-    "ideal_ranking_rationale": "Goldman Sachs own site should rank above news aggregators",
-    "expected_source_priority": ["goldmansachs.com", "finance.yahoo.com"]
-  },
-  "expected_scrape_challenges": {
-    "likely_page_types": ["financial_portal", "paywalled_article"],
-    "expected_elements": ["data_tables", "ticker_price_list"],
-    "noise_risks": ["yahoo_finance_ads", "goldman_login_wall"]
-  }
-}
+#### Validation Pipeline (per TC)
+
+Before a test case is accepted, it passes a strict multi-step validation:
+
+1. **Schema**: query ≥ 4 words, 2–4 dimensions, weights sum to 1.0, intent from valid list
+2. **Semantic**: `contrastive_fail` ≠ copy of `criteria` (Jaccard < 0.70), each criterion ≥ 10 words, no specific named facts/numbers embedded in criteria
+3. **Deduplication**: query Jaccard similarity against all history < 0.65
+4. **Up to 3 retries** per TC — on failure, the rejection reason is prepended to the next LLM call as an explicit correction signal
+
+---
+
+### Agent 2 — P1/P2 Multi-Agent Judge (`eval/judge.py`)
+
+The judge was redesigned from a 3-pass monolith (Coverage, Ranking, Scrape) to a two-tier multi-agent system that adapts to any rubric the test generator produces.
+
+![Test Cases with Dimension Scores](screenshots_new/testcases_table.png)
+
+#### Tier 1 — P1 Agent (Document Intelligence Profiler)
+
+One P1 agent call per scraped URL. Runs **concurrently** for all URLs. Uses `P1_MODEL` at `temperature=0.0` with JSON mode.
+
+**Domain pre-classification (deterministic, before LLM call):**
+URLs are classified into `authoritative` (.gov, .mil, .un.org, .who.int, etc.), `academic` (.edu, .ac.uk, etc.), `organization` (.org), or `commercial` based on TLD matching.
+
+**P1 extracts per URL:**
+
+| Field | Description |
+|-------|-------------|
+| `scrape_score` / `scrape_level` | Scrape fidelity score (0–1) and L1–L5 level |
+| `scrape_issues` | Specific identified issues (e.g., "tables flattened", "nav noise dominant") |
+| `nav_link_ratio` | Fraction of content that is navigation links (0–1) |
+| `boilerplate_pattern_count` | Count of detected boilerplate blocks |
+| `table_count`, `heading_count`, `list_count`, `code_block_count` | Structural element counts |
+| `primary_topic` | One precise sentence describing what the page is about |
+| `page_type` | Document type (official_documentation, news_article, blog_post, academic_paper, etc.) |
+| `publication_date` | Extracted publish date (YYYY-MM-DD or partial) |
+| `detected_language` | ISO 639-1 code, or "mixed" |
+| `query_relevance_score` | Float 0–1: how relevant this document is to the query |
+| `authority_score` / `authority_assessment` | Numerical credibility score + narrative |
+| `author_credentials` | Any professional credentials visible in the document |
+| `key_claims` | ≥5 atomic factual statements (subject + predicate + specific object) |
+| `data_points` | Exact numbers, measurements, thresholds as they appear |
+| `named_entities` | People, organizations, products/chemicals, locations, laws/standards |
+| `temporal_markers` | All explicit date references from the full body |
+| `section_summaries` | Per-heading key point summaries |
+| `table_contents` | Description + key data for each table |
+| `content_completeness` | complete / appears_truncated / partial / navigation_only / error_page |
+| `content_gaps` | What the query requires that this document doesn't address |
+| `query_coverage_assessment` | answers_query (bool), coverage_level, missing_aspects |
+
+**Post-processing guardrails (`_validate_p1_consistency`):**
+- `navigation_only` or `error_page` → key_claims cleared, scrape_score clamped ≤ 0.20, query_relevance = 0.0
+- word_count < 150 → key_claims limited to 2, section_summaries to 1
+- authority_score > 0.7 with no narrative → authority_score downgraded to 0.5
+- scrape_level = L5 with `appears_truncated` → downgraded to L4
+- Non-English content → query_relevance_score = 0.0
+
+#### Tier 2 — P2 Agents (Rubric Dimension Scorers)
+
+Five dimension families. Each active family runs as a separate concurrent LLM call. Uses `P2_MODEL` at `temperature=0.0` with JSON mode.
+
+**Routing:** Each rubric dimension is routed to a family by keyword matching on `dimension.name + dimension.criteria`:
+
+| Family | Keywords |
+|--------|----------|
+| `ranking` | ranking, ordering, priority, position, result order, rank |
+| `authority` | authority, credibility, trustworthy, source quality, expert, official, credentials |
+| `freshness` | temporal, freshness, recency, current, recent, date, latest, updated, real-time |
+| `precision` | accuracy, numerical, factual, precision, statistics, data, measurement, consistent |
+| `coverage` | everything else (default catch-all) |
+
+**P2 input:** All P1 profiles as JSON + the specific dimensions to evaluate + rubric grading notes + query context.
+
+**5-Step Chain of Thought per dimension:**
+
+| Step | Field | What It Captures |
+|------|-------|-----------------|
+| 1 | `evidence_found` | Specific quotes from P1 profiles supporting the judgment |
+| 2 | `criteria_checklist` | Per-condition MET / PARTIALLY_MET / NOT_MET with evidence |
+| 3 | `contrastive_fail_triggered` | Does the explicit failure pattern from the rubric match? |
+| 4 | `assigned_level` + `level_justification` | Which L1–L5 band, and why not the adjacent band |
+| 5 | `score` + `summary_reasoning` | Precise float within level range + one-sentence summary |
+
+**Score clamping:** `_clamp_score_to_level()` enforces that the numeric score falls within the declared level band. Mismatches are logged as warnings.
+
+#### Fidelity Dimension (Deterministic)
+
+Fidelity is not routed to any P2 LLM. It is computed directly from P1 scrape scores:
+
+```
+fidelity_score = 0.70 × mean(p1.scrape_score) + 0.30 × min(p1.scrape_score)
 ```
 
----
+This makes fidelity evaluation free of LLM variance — it is derived purely from the structured extraction already done in P1.
 
-### Agent 2 — LLM Judge: `eval/judge.py`
+#### Baseline Dimension Enforcement
 
-The **Judge** (LLM-B) evaluates each test case across **three dimensions concurrently** using `asyncio.gather()`.
+After routing, `enforce_baseline_dimensions()` checks that every evaluation includes at minimum: **fidelity, ranking, coverage, authority, freshness**. Any missing baselines are added at their fixed weights, with the existing rubric dimensions scaled down proportionally to maintain weight sum = 1.0.
 
-![Test case detail view with score breakdown and diagnosis](./screenshots/tc_detail_judge_scores.png)
+#### Sanity Checks
 
-#### Dimension 1: Coverage Evaluation
+After all evaluations are assembled, `sanity_check()` flags:
+- All dimensions scoring identically (likely LLM laziness)
+- Score compression — all scores in the 0.5–0.7 band (full L1–L5 scale unused)
+- Contradiction: `contrastive_fail_triggered = true` but `score > 0.40`
+- Level/score mismatch after clamping
 
-**What it measures:** Did Firecrawl's search results contain all the entities the query requires?
+Warnings are stored in `EvalResult.warnings` and surfaced in the dashboard.
 
-**How it works:**
-- Sends the judge `must_mention` and `should_mention` lists + result titles, snippets, and **first 2000 chars of scraped markdown** per result
-- The LLM quotes exact text where it found each term (or explains the miss)
-- Returns `recall_score` (0–1), hit/miss lists, `coverage_passed` boolean
+#### Judge Cache
 
-> **Why markdown preview matters:** Government portals and PDF-converted pages often bury key terms deep in the body — not in the 500-char snippet. The 2000-char markdown preview catches these.
+The judge caches results by a SHA-256 key computed from `query + rubric dimensions + sorted content hashes`. Cache hits skip all LLM calls and return immediately.
 
-#### Dimension 2: Ranking Evaluation
-
-**What it measures:** Did Firecrawl return the right sources in the right order?
-
-**How it works:**
-- Sends result URLs, titles, snippets + `expected_source_priority` and `ideal_ranking_rationale`
-- The LLM constructs an ideal permutation and computes divergence from Firecrawl's actual order
-- Returns `ndcg_at_5` (Normalized Discounted Cumulative Gain at 5), the `llm_ideal_ranking` permutation, and `improvement_suggestions`
-
-#### Dimension 3: Scrape Quality Evaluation
-
-**What it measures:** Is the scraped markdown clean, complete, and structurally intact?
-
-**How it works:**
-- Sends up to **8000 chars** of scraped markdown per URL
-- The LLM checks for: presence of `expected_elements` (e.g., `data_tables`, `code_blocks`), leakage of `noise_risks` (e.g., `cookie_consent_banner`), structural preservation (headings, tables, lists), completeness (truncation detection)
-- Returns per-URL `noise_score`, `structure_score`, `completeness_score`, `overall_markdown_quality`, and a list of `ScrapeIssue` objects
-
-#### Caching
-
-The judge uses a **deterministic cache key** = SHA-256 of `(query, sorted URLs, sorted must_mention)`. This means:
-- Same query + same URLs = instant in-memory cache hit (no LLM re-call)
-- A disk TTL cache is also available (configurable via `JUDGE_RESULT_TTL`)
+![Expanded Test Case Detail](screenshots_new/testcase_expanded.png)
 
 ---
 
-### Agent 3 — Improvement Agent: `eval/improvement_agent.py`
+### Agent 3 — Improvement Agent (`eval/improvement_agent.py`)
 
-The **Improvement Agent** (LLM-C) operates at **two levels**:
+The Improvement Agent operates at two levels:
 
-#### Level 1: Per-TC Diagnosis (runs live, inline with each test case)
+#### Level 1 — Per-TC Diagnosis (inline, background task)
 
-Called immediately after the judge scores each TC. For failing TCs (`overall_score < pass_threshold`), it:
-- Identifies which dimensions failed (coverage / ranking / scrape)
-- Sends the judge's scores, hit/miss lists, ranking permutation, and per-URL scrape quality
-- Returns a `TestCaseDiagnosis` with:
-  - `root_cause_summary`: 1–2 sentence plain-English diagnosis
-  - `coverage_diagnosis`: what entities were missing and why
-  - `ranking_diagnosis`: why Firecrawl's order diverged from ideal
-  - `scrape_diagnosis`: formatting, truncation, noise issues
-  - `improvement_actions`: 1–3 concrete engineering fixes
+Runs immediately after each TC's judge evaluation as a background task. Uses `IMPROVEMENT_AGENT_MODEL`.
 
-These per-TC diagnoses are written to `outputs/runs/{run_id}/tc_reports/{tc_id}.md` in real time (live markdown reports), and are also persisted in `run.json`.
+**Output — `TestCaseDiagnosis`:**
 
-#### Level 2: Cross-Run Synthesis (runs after all TCs complete)
+| Field | Description |
+|-------|-------------|
+| `root_cause_summary` | One-paragraph diagnosis of why this TC scored as it did |
+| `coverage_diagnosis` / `ranking_diagnosis` / `scrape_diagnosis` | Dimension-specific diagnosis text |
+| `improvement_actions` | List of concrete suggested actions |
+| `weak_dimensions` | Dimension names that scored below median |
+| `floor_failures` | Dimension names that triggered the dimension floor |
+| `micro_pattern` | `{pattern_type, affected_dimension, severity, description, suggested_fix}` — fed into RL signals |
+| `dpo_rationale` | Explicit preference rationale for the DPO training pair |
+| `url_quality_annotations` | Per-URL `{url, quality_score, quality_note}` — drives reward signals and listwise rankings |
+| `query_reformulation` | `{reformulated_query, expected_delta, rationale}` — becomes a `QueryReformulationPair` |
+| `criteria_summary` | Forwarded criteria checklist from the judge |
 
-Takes the full picture — all eval results, all TC diagnoses, score histograms, intent/difficulty/category breakdowns, ranking disagreements, coverage miss frequency — and produces an `ImprovementAnalysis`:
+#### Level 2 — Cross-Run Synthesis (post-run)
 
-| Output | Description |
-|--------|-------------|
-| `root_causes` | Top-5 root causes with `severity`, `confidence`, `frequency`, list of affected TC IDs, and specific `evidence` quotes |
-| `proposals` | Engineering proposals with `expected_impact`, `effort`, and a `priority_score` (1–10) |
-| `quick_wins` | Low-effort, high-impact fixes |
-| `cross_dimension_patterns` | Patterns that span multiple dimensions (e.g., "missing authoritative domain → ranking AND scrape fail") |
-| `judge_bias_flags` | Warnings about systematic judge behavior (e.g., penalizing JavaScript pages that have content in non-text form) |
-| `enhanced_patterns` | Updated RL training taxonomy fed back into the signal generator |
+After all TCs complete, the Improvement Agent performs a cross-run analysis with structured inputs:
+
+- Score distributions as histograms across all dimensions
+- `per_tc_diagnoses_summary` with all micro-patterns and reformulations
+- `ranking_disagreements`: all dimensions that scored < 0.7 with contrastive_fail triggered
+- `worst_10_tcs`: full breakdown including worst scrape URL and structural issues
+- `category_breakdown`, `intent_breakdown`, `difficulty_breakdown`: aggregated performance slices
+- `scrape_evidence`: raw content metadata per TC
+
+**Output — `ImprovementAnalysis`:**
+
+| Field | Description |
+|-------|-------------|
+| `root_causes` | Top 5 root causes with dimension, evidence (cited tc_ids), severity, frequency, confidence |
+| `proposals` | Engineering proposals per root cause with expected_impact and priority_score |
+| `quick_wins` | Low-effort/high-impact fixes |
+| `cross_dimension_patterns` | Failure patterns observable across multiple dimension types |
+| `judge_bias_flags` | Dimensions that consistently score high while per-TC diagnoses show failures |
+| `enhanced_patterns` | Enriched RL taxonomy patterns |
+
+![Improvement Analysis Diagnostics](screenshots_new/rl_diagnostics.png)
 
 ---
 
-### Calibration: `eval/calibration.py`
+### Scoring System
 
-Before running evaluations, `JudgeCalibration` validates that the configured LLM judge is behaving sensibly by scoring a **gold standard test case** with:
-- One perfect result (full markdown, structured data, `found_this` term present)
-- One terrible result (cookie banner, navigation menu, no real content)
+#### L1–L5 Scoring Levels
 
-Expected outcomes for calibration to **pass**:
-- `coverage.recall_score > 0.8`
-- `ranking.ndcg_at_5 > 0.8`
-- Perfect page `overall_markdown_quality ≥ 0.7`
-- Terrible page `overall_markdown_quality ≤ 0.5`
+All scoring operates on a 5-level ordinal scale with numeric bands:
 
-If calibration fails, the judge model is likely defaulting or hallucinating scores.
+| Level | Range | Interpretation |
+|-------|-------|----------------|
+| L1 | 0.00 – 0.20 | Critical failure — fundamental problems |
+| L2 | 0.20 – 0.40 | Major deficiency — significant gaps |
+| L3 | 0.40 – 0.60 | Partial / adequate — covers the basics |
+| L4 | 0.60 – 0.80 | Good — meets most criteria |
+| L5 | 0.80 – 1.00 | Excellent — strong across all criteria |
 
----
+#### Overall Score Calculation
 
-### Pipeline Orchestrator: `pipeline/orchestrator.py`
+```
+overall_score = Σ (dimension.weight × dimension.score)
+```
 
-The `Orchestrator` is the central coordinator. It owns all client/agent instances and drives the round-based execution loop.
+Weights are defined per-TC in the rubric and always sum to 1.0 (after baseline dimension injection).
 
-#### Key Responsibilities
-
-1. **Init phase:** `qdrant.init_collection()`, `qdrant.init_query_cache_collection()`, `embedder.warmup()` run concurrently.
-
-2. **Resume support:** On startup, loads existing `outputs/data/test_cases.json` so a crashed run can continue from where it left off without re-generating TCs.
-
-3. **Round loop:**
-   ```python
-   while len(all_eval_results) < total_needed:
-       # 1. Fetch KB URLs + previous queries for diversity
-       # 2. Generate this_batch TCs (LLM-A)
-       # 3. asyncio.gather(*[_process_tc(tc) for tc in new_tcs])
-       # 4. Record round stats (new_indexed, deduped)
-   ```
-
-4. **`_process_tc()` — the core per-TC function:**
-   - Layer 1 cache check → Firecrawl search if miss
-   - Layer 2 KB hybrid search for each top URL
-   - Concurrent scraping of all KB-miss URLs
-   - Background indexing task launched immediately
-   - Judge evaluation (3 concurrent passes)
-   - Per-TC improvement agent diagnosis
-   - Live report written to disk
-   - SSE event emitted (`judge_scored`)
-   - Await background indexing to complete before returning (ensures KB is ready for next round)
-
-5. **Post-round phases:**
-   - Full retrieval comparison (KB vs Firecrawl vs Ideal)
-   - RL signal generation
-   - Cross-run improvement synthesis
-   - Final report build
-
-#### Concurrency Control
+#### Hybrid Pass Gate
 
 ```python
-max_concurrent = min(
-    len(fc_pool._clients),      # rate-limited by Firecrawl key count
-    len(or_pool._clients),      # rate-limited by OpenRouter key count
-    config.max_concurrent_tcs
-)
-semaphore = asyncio.Semaphore(max_concurrent)
+def passes(overall_threshold=0.65, dimension_floor=0.40) -> bool:
+    if overall_score < overall_threshold:
+        return False
+    for dim in dimension_evals:
+        if not dim.is_fallback and dim.score < dimension_floor:
+            return False
+    return True
 ```
 
-This ensures you never fire more parallel TC executions than you have API keys for, preventing rate limit cascades.
+A test case can fail to pass even with a high overall score if a single dimension has a critical failure.
+
+![Overview Gauge Rings](screenshots_new/overview_rings.png)
 
 ---
 
-### Firecrawl Client Pool: `clients/firecrawl_client.py`
+### RL Signal Generation
 
-`FirecrawlClientPool` manages a **round-robin pool** of Firecrawl API keys with:
-- **Per-key cooldowns:** If a key returns a 429, that slot is cooled down for `10 + (attempt * 2)` seconds; the next key is tried immediately
-- **All-slot wait:** If all keys are cooling down, sleeps until the earliest-available slot is ready
-- **Thread offloading:** The synchronous `firecrawl` SDK is called via `asyncio.to_thread()` to avoid blocking the event loop
+7 structured training signal files are produced per run, all in `outputs/runs/{run_id}/rl_signals/`:
 
-#### `search(query, limit=5) → (List[FirecrawlSearchResult], latency_ms)`
-Normalizes the Firecrawl SDK response (which can return either a `{"web": [...]}` or `{"data": [...]}` shape depending on SDK version) into a list of `FirecrawlSearchResult` dataclass instances.
+![DPO Pairs](screenshots_new/rl_dpo_pairs.png)
 
-#### `scrape(url) → (markdown, latency_ms, status)`
-Requests `formats=['markdown']` and returns the raw markdown string. Falls back from `client.scrape()` to `client.scrape_url()` for SDK compatibility. Status is `"success"`, `"empty_content"`, or `"error: <message>"`.
+| File | Signal Type | Description |
+|------|-------------|-------------|
+| `dpo_pairs.jsonl` | **DPO Pairs** | Preference learning — chosen URL (highest LLM quality annotation) vs. rejected URL (Firecrawl's top-ranked) when they differ |
+| `rewards.jsonl` | **Reward Signals** | Scalar composite reward per URL: `0.30×relevance + 0.25×llm_quality + 0.20×completeness + 0.15×freshness + 0.10×authority` |
+| `listwise_rankings.jsonl` | **Listwise Rankings** | Full ideal URL ordering with quality scores and notes, vs. Firecrawl's actual ordering |
+| `contrastive_fail_pairs.jsonl` | **Contrastive Fail Pairs** | Good-state vs. bad-state document pairs when a rubric dimension's explicit failure pattern is triggered |
+| `query_reformulations.jsonl` | **Query Reformulations** | Original failing query + LLM-suggested better formulation, tagged by chaos archetype and failing dimensions |
+| `sft_gold.jsonl` | **SFT Gold Examples** | High-scoring TCs (≥ `sft_gold_score_threshold`, no floor failures) with gold URLs, key claims, and full rubric |
+| `scrape_quality_labels.jsonl` | **Scrape Quality Labels** | Per-URL quality label (excellent/good/poor/unusable) with structural features: word count, nav ratio, table count, boilerplate, truncation |
+| `taxonomy.json` | **Pattern Taxonomy** | Aggregated micro-patterns grouped by type, sorted by frequency across all TCs |
 
----
-
-### OpenRouter Client Pool: `clients/openrouter.py`
-
-`OpenRouterClientPool` wraps `httpx.AsyncClient` with:
-- **Round-robin key selection** with per-key cooldowns on HTTP 429
-- **Exponential backoff** on 502/503 errors (2^attempt seconds)
-- **Timeout:** 300 seconds per LLM call
-- **Provider pinning:** When `providers` is set (e.g., `["DeepInfra", "Together"]`), the request sends `"provider": {"order": [...], "allow_fallbacks": false}` to OpenRouter
-- **Thinking block stripping:** Removes `<think>...</think>` tags from models that output reasoning traces
+![RL Taxonomy](screenshots_new/rl_taxonomy.png)
 
 ---
 
-### Embedder: `clients/embedder.py`
+### Knowledge Base — Qdrant + BGE-M3
 
-Uses **BAAI/bge-m3** (locally, via `FlagEmbedding`) to produce both:
-- **Dense vectors** (1024-dimensional, cosine similarity)
-- **Sparse vectors** (BM25-style lexical weights from the BGE-M3 tokenizer)
+#### Embedding Model
 
-This hybrid representation powers the RRF (Reciprocal Rank Fusion) search in Qdrant.
+**BAAI/bge-m3** runs locally via `FlagEmbedding`. Produces:
+- **Dense vector** (1024 dimensions) for semantic similarity
+- **Sparse vector** (BM25-style lexical weights) for keyword matching
 
-**Why BGE-M3?**
-- Single model producing both dense and sparse vectors eliminates the need for a separate BM25 index
-- Multilingual support (100+ languages) handles queries across domains
-- `use_fp16=True` on CUDA, `False` on CPU — auto-detected at load time
+Both are combined with **Reciprocal Rank Fusion (RRF)** at query time. The embedder is protected by a semaphore (`asyncio.Semaphore(1)`) to prevent concurrent PyTorch model calls.
 
-**Thread safety:** A `threading.Lock()` protects the singleton model. An `asyncio.Semaphore(1)` serializes all async embed calls, since PyTorch's model is not safe for concurrent `asyncio.to_thread()` calls.
+#### Qdrant Collections
 
-**Warmup:** Called at startup to pre-load the model weights before the first real request.
+| Collection | Purpose |
+|------------|---------|
+| `firecrawl_eval` (configurable) | Content KB — chunked, deduplicated scraped documents |
+| `firecrawl_query_cache` | Query result cache — dense-only, stores search result lists by query embedding |
 
----
+#### Content Chunking
 
-### Qdrant Store: `search_ir/qdrant_store.py`
+The indexer uses an adaptive markdown chunker:
+- Target chunk size scales with document length: `min(5000, 1500 + (doc_len // 10000) × 500)` characters
+- 15% overlap between chunks
+- Heading boundaries flush chunks early (at ≥ 40% of target size)
+- Each chunk stores: `url`, `query_origin`, `content_hash`, `doc_content_hash`, `chunk_index`, `total_chunks`, `scrape_timestamp`
 
-Manages two Qdrant collections via `AsyncQdrantClient`:
+#### Content Deduplication
 
-#### Collection 1: `firecrawl_eval` (Content KB)
+`index_batch_deduped()` bulk-checks all chunk SHA-256 hashes against existing Qdrant points before embedding. Only genuinely new chunks are embedded and upserted.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `dense` vector | 1024-dim cosine | BGE-M3 dense embedding of chunk |
-| `sparse` vector | keyword indices | BGE-M3 lexical weights for BM25 hybrid |
-| `url` payload | keyword index | Source URL |
-| `content` payload | string | Chunk text (~2000 chars) |
-| `content_hash` payload | keyword index | SHA-256 of chunk (for deduplication) |
-| `query_origin` payload | keyword index | The query that caused this chunk to be indexed |
-| `scrape_timestamp` payload | float | Unix timestamp of scrape (for freshness) |
+#### KB Reconstruction
 
-#### Collection 2: `firecrawl_query_cache` (Query Cache)
+When a URL qualifies for an L2 cache hit, the retriever scrolls **all** chunks for that URL (up to 10,000), sorts them by `chunk_index`, and concatenates them back into the full document. This ensures the P1 agent always receives complete document content even from cached sources.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `dense` vector | 1024-dim cosine | BGE-M3 dense embedding of query |
-| `query` payload | keyword | Query string |
-| `results` payload | JSON string | Serialized `FirecrawlSearchResult` list (without markdown) |
-| `timestamp` payload | float | Cache insertion time |
+![KB Explorer](screenshots_new/kb_explorer.png)
 
 ---
 
-### Indexer: `search_ir/indexer.py`
+### Regression Detection
 
-The `Indexer` converts scraped markdown into Qdrant-ready vector points.
-
-#### Chunking Strategy
-
-```python
-MAX_MARKDOWN_CHARS = 8000    # Truncate input early
-MAX_CHUNKS_PER_DOC = 5       # Cap to keep CPU embedding fast
-CHUNK_SIZE = ~2000 chars     # Split at heading boundaries (# headings) or 2000-char limit
-```
-
-Chunks are split at `#` heading lines when the current chunk is >500 chars, otherwise at the 2000-char limit. This preserves semantic coherence within heading sections.
-
-#### `index_batch_deduped(new_entries)`
-
-The main indexing method. For each chunk:
-1. Compute SHA-256 content hash
-2. Check Qdrant for existing point with that hash
-3. If found → increment `deduped` count, skip embedding
-4. If not → add to batch for embedding
-
-All new chunks are embedded in mini-batches of 8 via `embedder.embed_batched()`, then upserted to Qdrant in a single `client.upsert()` call.
-
-Returns `IndexStats(new_indexed, updated, deduped, total_chunks)`.
+`reports/regression.py` — `RegressionDetector` compares each run's dimension scores against historical run averages. Regressions (dimension drops ≥ a threshold) are surfaced in the run report's regression section.
 
 ---
 
-### Retriever: `search_ir/retriever.py`
+### Ranking Comparator
 
-The `Retriever` implements two distinct lookup strategies used at different points in the pipeline.
-
-#### Layer 1 — Query Cache: `find_similar_query()`
-
-```python
-results = await qdrant.client.query_points(
-    collection_name="firecrawl_query_cache",
-    query=dense_vec,
-    using="dense",
-    score_threshold=0.82   # configurable
-)
-```
-
-Returns a cache hit (with the cached `FirecrawlSearchResult` list) if cosine similarity ≥ threshold AND age < `max_age_seconds`. Returns the precomputed `dense_vec` in both hit and miss cases to avoid recomputing it when storing a miss.
-
-#### Layer 2 — KB Content: `get_kb_coverage_for_urls()`
-
-For each URL returned by Firecrawl search, runs a **hybrid BM25 + vector search scoped to that URL**:
-
-```python
-prefetch = [
-    Prefetch(dense_vec, using="dense", limit=10, filter=url_filter),
-    Prefetch(sparse_vec, using="sparse", limit=10, filter=url_filter)
-]
-result = await client.query_points(
-    prefetch=prefetch,
-    query=FusionQuery(fusion=Fusion.RRF)  # Reciprocal Rank Fusion
-)
-```
-
-- Filters strictly to the specific URL via `FieldCondition(key="url", match=MatchValue(value=url))`
-- Only returns a hit if the best-scoring chunk for this URL × query scores above `kb_content_score_threshold` (default 0.08)
-- Reassembles multiple chunks in `scrape_timestamp` order to reconstruct the original document
-
-All URL lookups for a batch fire **concurrently** via `asyncio.gather()` with the query embedded only once (shared `dense_vector`, `sparse_vector`).
-
-#### Full KB Search: `search()`
-
-Used post-run for the retrieval comparison phase. Returns top-N results across the entire KB (no URL filter), ranked by RRF score.
+`eval/comparator.py` — `RankingComparator` compares the order of URLs returned by Firecrawl against the LLM-ideal ordering derived from P1 quality annotations. Results are included in the run report's retrieval comparison section and fed into the Improvement Agent's cross-run input.
 
 ---
 
-### RL Signal Generator: `rl/signal_generator.py`
+### Dimensions Tab
 
-Generates two types of training signals from the judge's evaluation results.
+![Rubric Dimensions Tab](screenshots_new/dimensions_tab.png)
 
-#### DPO Pairs (Direct Preference Optimization)
-
-Generated when the judge's ideal ranking disagrees with Firecrawl's ranking (specifically when `ideal_rank[0] != fc_rank[0]` — top result differs):
-
-```python
-DPOPair(
-    query=...,
-    chosen=DPOVariant(url=ideal_top_url, content_snippet=..., judge_score=eval_res.overall_score),
-    rejected=DPOVariant(url=firecrawl_top_url, content_snippet=..., judge_score=rejected_score),
-    preference_rationale=eval_res.ranking.ranking_reasoning
-)
-```
-
-The rejected score is computed as `overall_score × (rejected_sq / chosen_sq)`, capped at 90% of the chosen score — ensuring a meaningful gap between chosen and rejected.
-
-#### Reward Signals
-
-For each scraped URL × test case, a composite reward is computed:
-
-```
-reward = 0.35 × relevance         (coverage recall score)
-       + 0.30 × markdown_quality  (scrape overall quality)
-       + 0.20 × completeness      (scrape completeness score)
-       + 0.15 × freshness         (exp(-age_s / 600), from KB metadata)
-```
-
-Freshness uses exponential decay with a 10-minute half-life. Live scrapes (no KB metadata) get `freshness = 1.0`.
-
-#### Failure Taxonomy
-
-Groups eval results by `(category, intent)`. Any group with `avg_score < 0.8` gets an `ImprovementPattern` citing the most common scrape issue type in that group. These are fed back via `update_patterns()` after the Improvement Agent enriches them.
-
-**Output files** (per run):
-- `outputs/runs/{run_id}/rl_signals/dpo_pairs.jsonl`
-- `outputs/runs/{run_id}/rl_signals/rewards.jsonl`
-- `outputs/runs/{run_id}/rl_signals/taxonomy.json`
-
----
-
-### Report Builder: `reports/report_builder.py`
-
-Generates two types of markdown reports:
-
-1. **`outputs/runs/{run_id}/report.md`** — Full run summary with executive summary, batch progression table, cache analytics, retrieval comparison, improvement roadmap, RL summary, regression delta, and failed TC appendix.
-
-2. **`outputs/runs/{run_id}/tc_reports/{tc_id}.md`** — Per-TC reports with the query, scores, judge reasoning per dimension, AI diagnosis, and fix actions.
-
-Per-TC reports are built both **live** (during execution, via `build_single_tc_report_async()`) and in a final batch pass to fill any gaps.
+The Dimensions tab renders the specific rubric dimensions used in the loaded run as cards — showing each dimension's name, weight percentage, criteria text, and contrastive fail description. Because rubrics are per-TC and dynamically generated, the dimensions shown are discovered from the run's eval results.
 
 ---
 
 ## Data Models
 
-### `TestCase` (`models/test_case.py`)
+### `TestCase`
 
 ```python
 @dataclass
 class TestCase:
-    id: str                                   # tc_{uuid[:8]}
-    query: str                                # The search query
-    intent: str                               # factual_lookup | comparative_research | ...
-    difficulty: str                           # easy | hard
-    category: str                             # structured_data_extraction | pdf_document | ...
-    cache_intent: str                         # novel | semantic_near_miss | exact_duplicate | ...
-    expected_coverage: TestCaseExpectedCoverage
-    expected_ranking: TestCaseExpectedRanking
-    expected_scrape_challenges: TestCaseExpectedScrapeChallenges
+    id: str                      # e.g., "tc_3b095b54"
+    query: str                   # The adversarial search query
+    domain: str                  # One of 16 knowledge domains
+    intent: str                  # One of 7 valid intents
+    difficulty: str              # "easy" | "medium" | "hard"
+    chaos_archetype: str         # One of 7 archetypes
+    cache_relationship: str      # "novel" | "same_source_different_angle" | ...
+    category: str                # Same as domain (UI compatibility)
+    parent_case_id: Optional[str] # Set for cache variants
+    rubric: Optional[EvalRubric]  # 2–4 custom dimensions
+    cache_intent: str            # Mirrors cache_relationship
 ```
 
-Valid `intent` values: `factual_lookup`, `comparative_research`, `tutorial_howto`, `data_extraction`, `navigational`, `exploratory`, `real_time`
+### `EvalRubric` / `RubricDimension`
 
-Valid `category` values: `structured_data_extraction`, `dynamic_spa_content`, `pdf_document`, `code_documentation`, `rapidly_changing`, `long_form_article`, `minimal_content`, `nav_heavy_portal`, `multi_language`, `paywalled_content`
+```python
+@dataclass
+class RubricDimension:
+    name: str          # e.g., "source_authority"
+    weight: float      # Contribution to overall score (all weights sum to 1.0)
+    criteria: str      # What a successful result looks like
+    contrastive_fail: str  # Explicit failure pattern description
 
-### `EvalResult` (`models/eval_result.py`)
+@dataclass
+class EvalRubric:
+    dimensions: List[RubricDimension]
+    grading_notes: str  # Meta-guidance for edge case handling
+```
+
+### `P1Result`
+
+Structured document profile produced by the P1 agent — see [Agent 2 section](#tier-1--p1-agent-document-intelligence-profiler) for the full field list.
+
+### `DimensionEval`
+
+```python
+@dataclass
+class DimensionEval:
+    dimension_name: str
+    weight: float
+    evidence_found: List[str]           # Step 1: quotes from profiles
+    criteria_checklist: List[CriteriaCheck]  # Step 2: per-condition status
+    contrastive_fail_triggered: bool    # Step 3
+    contrastive_fail_explanation: str   # Step 3
+    assigned_level: str                 # Step 4: "L1"–"L5"
+    level_justification: str            # Step 4
+    score: float                        # Step 5: clamped to level band
+    reasoning: str                      # Summary sentence
+    is_fallback: bool                   # True if LLM call failed
+```
+
+### `EvalResult`
 
 ```python
 @dataclass
 class EvalResult:
     test_case_id: str
-    coverage: CoverageEval          # recall_score, must_mention_hits/misses
-    ranking: RankingEval            # ndcg_at_5, firecrawl/ideal rankings
-    scrape_quality: Dict[str, ScrapeQualityEval]  # per-URL scores
-    overall_score: float            # weighted composite
+    dimension_evals: List[DimensionEval]
+    overall_score: float
+    document_profiles: Optional[List[Dict]]  # Serialized P1Results
+    warnings: List[str]                      # Sanity check flags
+    result_diversity: Optional[Dict]
+
+    # Backward-compat convenience properties
+    coverage_score: float   # Best-match from dimension_evals
+    ranking_score: float
+    fidelity_score: float
+    floor_failures: List[str]  # Dimensions below 0.40
 ```
+
+### RL Signal Dataclasses
+
+| Class | Fields |
+|-------|--------|
+| `DPOPair` | query, test_case_id, chosen (DPOVariant), rejected (DPOVariant), preference_rationale |
+| `RewardSignal` | query, url, reward_components (relevance, completeness, freshness, markdown_quality, authority), composite_reward, trajectory (search_rank, ideal_rank, rank_delta) |
+| `ListwiseRankingExample` | query, ideal_ranking (List[str]), url_quality_scores, firecrawl_ranking, confidence |
+| `ContrastiveFailPair` | query, dimension, bad_state (dict), good_state (dict), failure_explanation, judge_score, failure_level |
+| `QueryReformulationPair` | original_query, reformulated_query, chaos_archetype, failing_dimensions, expected_coverage_delta |
+| `SFTGoldExample` | query, overall_score, gold_urls, key_claims_covered, dimension_scores, rubric_dimensions |
+| `ScrapeQualityLabel` | url, quality_label (excellent/good/poor/unusable), fidelity_score, issues, noise_ratio, word_count, has_tables, tables_preserved, content_completeness |
 
 ---
 
-## The Two-Layer Cache System
-
-The cache exists for two reasons:
-1. **Cost efficiency:** Avoid re-calling Firecrawl for near-identical queries or re-scraping URLs scraped recently
-2. **Cache correctness testing:** Variant test cases are designed to exercise the cache, verifying it doesn't silently return wrong results for near-miss queries
-
-```
-Query arrives
-     │
-     ▼
-Layer 1: Vector similarity search in firecrawl_query_cache
-     │   threshold=0.82 (cosine), max_age=6000s
-     ├── HIT  → reuse Firecrawl search result list (mark as "query_cache_hit")
-     └── MISS → call Firecrawl.search(), store results in query cache
-                     │
-                     ▼
-               For each top-N URL:
-               Layer 2: RRF hybrid search in firecrawl_eval (scoped to URL)
-                     │   threshold=0.08 (RRF score), freshness_window=600s
-                     ├── HIT + FRESH → reuse scraped content (mark as "kb_semantic_hit")
-                     ├── HIT + STALE → re-scrape, track content_drift hash delta
-                     └── MISS        → scrape via Firecrawl, queue for indexing
-```
-
-**Why RRF for Layer 2 and not just URL lookup?**
-A naive URL lookup would return old content even if the KB has a poor-quality version. By running a query-aware hybrid search, we ensure the KB content actually answers the *specific query* before reusing it. A page cached for "Roth IRA limits" won't be reused for "Roth IRA conversion penalties" even if it's the same URL.
-
----
-
-## Scoring System
-
-Overall score is a **weighted linear combination**:
-
-```
-overall = 0.25 × coverage_recall_score
-        + 0.35 × ranking_ndcg_at_5
-        + 0.40 × avg_scrape_markdown_quality
-```
-
-**Why scrape gets the highest weight (0.40)?**
-Search coverage and ranking measure Firecrawl's *discovery* ability. Scrape quality measures *extraction* — the final step where the system either succeeds or fails to deliver usable content. A perfect ranking of perfect search results is worthless if the scraped markdown is truncated, noisy, or missing tables.
-
-| Score Range | Interpretation |
-|-------------|---------------|
-| ≥ 0.80 | ✅ Pass — system performed well on all dimensions |
-| 0.70–0.79 | 🟡 Marginal — one dimension is weak |
-| 0.50–0.69 | 🔴 Fail — multiple dimensions degraded |
-| < 0.50 | ❌ Critical — systemic failure (access blocked, data missing entirely) |
-
----
-
-## RL Signal Generation
-
-The pipeline produces training data for **fine-tuning or reinforcement learning** of a search/scrape model:
-
-| Signal Type | Format | Use Case |
-|-------------|--------|----------|
-| **DPO Pairs** | JSONL — `{query, chosen, rejected, rationale}` | Preference learning — teach model to prefer authoritative source over social media for data queries |
-| **Reward Signals** | JSONL — `{query, url, reward_components, composite_reward, trajectory}` | RLHF scalar reward — composite of relevance, markdown quality, completeness, freshness |
-| **Failure Taxonomy** | JSON — `[{issue, frequency, description, suggested_fix}]` | Curriculum learning — focus training on the most common failure categories |
-
-The `rank_delta` in `Trajectory` (`ideal_rank - firecrawl_rank`) provides a direct signal for learning ranking corrections.
-
----
-
-## Pipeline Execution Flow (Step-by-Step)
-
-```
-Startup
- ├── Init Qdrant collections (concurrent)
- ├── Warmup BGE-M3 embedder
- └── Load existing test_cases.json (resume support)
-
-Round Loop (until num_test_cases reached):
- ├── Fetch previous queries + KB URLs
- ├── Decide: anchor round (65%) or variant round (35%)
- ├── Generate batch of TCs (LLM-A)
- ├── Persist test_cases.json
- │
- ├── For each TC (concurrent, up to max_concurrent_tcs):
- │    ├── Layer 1 cache check
- │    ├── Firecrawl search (if miss)
- │    ├── Store in query cache (if miss)
- │    ├── Layer 2 KB coverage check (concurrent per URL)
- │    ├── Scrape missing URLs (concurrent)
- │    ├── Launch background indexing task
- │    ├── Judge: Coverage + Ranking + Scrape (concurrent)
- │    ├── Improvement Agent: per-TC diagnosis
- │    ├── Write live TC report to disk
- │    ├── Emit SSE event (judge_scored)
- │    └── Await indexing completion
- │
- └── Emit round_complete SSE event
-
-Post-Loop:
- ├── RL signal generation (DPO pairs, rewards, taxonomy)
- ├── Full retrieval comparison (KB rank vs Firecrawl rank)
- ├── Improvement Agent: cross-run synthesis
- ├── Save RL signals to disk
- ├── Build final report.md
- ├── Build any missing per-TC reports
- ├── Write run.json
- └── Emit run_complete SSE event
-```
-
----
-
-## Output Directory Structure
+## Output Structure
 
 ```
 outputs/
 ├── data/
-│   ├── test_cases.json          # Accumulated TCs (resume support + history)
-│   └── judge_cache.json         # Judge result disk cache (if TTL > 0)
+│   └── test_case_history.jsonl    # Accumulated TC history (used for dedup + cache variants)
 │
 └── runs/
-    └── run_20260701_152627/
-        ├── run.json             # Full run data (TCs, eval results, diagnoses, improvement_analysis)
-        ├── report.md            # Executive summary report
+    └── run_YYYYMMDD_HHMMSS/
+        ├── run.json               # Full run: test_cases, eval_results, tc_diagnoses,
+        │                          #   improvement_analysis, regression, run_meta
+        ├── run_meta.json          # Lightweight status + overall_score + timing
+        ├── session.log            # Full log of this run's execution
+        ├── report.md              # Full markdown evaluation report
         ├── tc_reports/
-        │   ├── tc_a1b2c3d4.md   # Per-TC markdown report
-        │   └── ...
+        │   └── tc_XXXXXXXX.md    # Per-TC markdown report
         └── rl_signals/
-            ├── dpo_pairs.jsonl  # DPO training pairs
-            ├── rewards.jsonl    # Per-URL reward signals
-            └── taxonomy.json    # Failure pattern taxonomy
-```
-
----
-
-## Setup & Installation
-
-### Prerequisites
-
-- Python 3.11+
-- A [Firecrawl](https://firecrawl.dev) API key
-- An [OpenRouter](https://openrouter.ai) API key
-- A [Qdrant](https://qdrant.tech) instance (cloud or local)
-- ~4GB RAM for BGE-M3 (CPU) or a CUDA GPU for faster embedding
-
-### Install Dependencies
-
-```bash
-# From the Firecrawl project root
-pip install -r requirements.txt
-```
-
-Key packages:
-- `firecrawl-py` — Firecrawl SDK
-- `FlagEmbedding` — BGE-M3 local embedder
-- `qdrant-client` — Async Qdrant client
-- `fastapi`, `uvicorn`, `sse-starlette` — Web dashboard
-- `httpx` — Async HTTP for OpenRouter calls
-- `python-dotenv` — `.env` loading
-
----
-
-## Configuration Reference (`.env`)
-
-Create a `.env` file in the `Firecrawl/` root:
-
-```env
-# ─── Firecrawl API Keys (pool — add up to 5) ───────────────────────────────
-FIRECRAWL_API_KEY_1=fc-your-key-here
-FIRECRAWL_API_KEY_2=fc-second-key-optional
-
-# ─── OpenRouter API Keys (pool — add up to 5) ──────────────────────────────
-OPENROUTER_KEY_1=sk-or-your-key-here
-OPENROUTER_KEY_2=sk-or-second-key-optional
-
-# ─── Qdrant ────────────────────────────────────────────────────────────────
-QDRANT_URL=https://your-qdrant-cluster.qdrant.io
-QDRANT_API_KEY=your-qdrant-api-key
-QDRANT_COLLECTION_NAME=firecrawl_eval
+            ├── dpo_pairs.jsonl
+            ├── rewards.jsonl
+            ├── listwise_rankings.jsonl
+            ├── contrastive_fail_pairs.jsonl
+            ├── query_reformulations.jsonl
+            ├── sft_gold.jsonl
+            ├── scrape_quality_labels.jsonl
+            └── taxonomy.json
 ```
 
 ---
 
 ## Running the Pipeline
 
-### Web Dashboard (Recommended)
+### Prerequisites
 
 ```bash
-python run.py
-# → Dashboard available at http://localhost:8000
+pip install -r requirements.txt
 ```
 
-![Built-in Report tab rendering self-generating run documentation](./screenshots/frontend_rendered_report_tab.png)
+Requires: Python 3.10+, a running Qdrant instance (cloud or local), Firecrawl API keys, and OpenRouter API keys.
 
-### CLI Mode
+**Local Qdrant (Docker):**
+```bash
+docker run -p 6333:6333 qdrant/qdrant
+```
+
+### Environment Setup
+
+Create a `.env` file in the project root:
+
+```env
+FIRECRAWL_API_KEY_1=fc-...
+OPENROUTER_KEY_1=sk-or-...
+OPENROUTER_KEY_2=sk-or-...
+
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+
+GENERATOR_MODEL=minimax/minimax-m3
+P1_MODEL=deepseek/deepseek-v4-flash
+P2_MODEL=deepseek/deepseek-v4-flash
+IMPROVEMENT_AGENT_MODEL=z-ai/glm-5.2
+
+NUM_TEST_CASES=30
+PASS_THRESHOLD=0.65
+```
+
+### Launch
 
 ```bash
-# Full run (uses NUM_TEST_CASES from .env)
+# Web dashboard (recommended)
+python run.py
+
+# CLI — full run
 python run.py --cli
 
-# Quick smoke test with 5 TCs
+# Quick smoke test (5 cases)
 python run.py --cli --cases 5
-
-# Judge calibration only
-python run.py --calibrate-only
-```
-
-### Reading Reports
-
-After a run completes:
-
-```bash
-# View the full markdown report
-cat outputs/runs/run_YYYYMMDD_HHMMSS/report.md
-
-# View a specific TC report
-cat outputs/runs/run_YYYYMMDD_HHMMSS/tc_reports/tc_a1b2c3d4.md
-
-# View RL signals
-cat outputs/runs/run_YYYYMMDD_HHMMSS/rl_signals/dpo_pairs.jsonl
 ```
 
 ---
 
-## Web Dashboard API
+## Dashboard Walkthrough
 
-All dashboard API endpoints return JSON. The live dashboard uses the SSE stream for real-time updates:
+### Live Pipeline Tab
 
-```javascript
-// Connect to a run's SSE stream
-const source = new EventSource(`/api/runs/${runId}/stream`);
-source.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'judge_scored') {
-        console.log(`TC ${data.tc_id}: overall=${data.overall}`);
-    }
-};
-```
+![Live Pipeline](screenshots_new/live_pipeline_streaming.png)
 
-![RL Signals tab showing AI-generated Pattern Taxonomy and failure clusters](./screenshots/frontend_rl_taxonomy_charts.png)
+The left panel shows a real-time SSE event timeline: TC generation, search results, scrape completions, P1/P2 scoring, and diagnosis events stream in chronologically. The right panel shows the live leaderboard — TC IDs and their overall scores as they complete, updated in real time.
 
-![RL Signals tab with DPO pairs and reward signals](./screenshots/frontend_rl_signals_dpo.png)
+### Overview Tab
+
+![Overview Rings](screenshots_new/overview_rings.png)
+
+Gauge rings for each rubric dimension in the run. The stats row below shows aggregate pass rate, the best and worst scoring queries, and total run duration.
+
+### Test Cases Tab
+
+![Test Cases Table](screenshots_new/testcases_table.png)
+
+The main table shows all TCs with overall score and one column per rubric dimension. Click any row to expand its full detail panel.
+
+![Expanded Test Case](screenshots_new/testcase_expanded.png)
+
+The expanded panel shows the TC's query, rubric, per-dimension scores with level and reasoning, and the full P1 document profiles for each URL.
+
+### Report Tab
+
+![Report Tab](screenshots_new/report_tab.png)
+
+The rendered markdown run report. Includes: run configuration, executive summary, floor failures, dimension breakdown, per-TC results, cache analytics, improvement proposals, and regression data. A download button exports the raw markdown.
+
+### RL Signals Tab
+
+![DPO Pairs](screenshots_new/rl_dpo_pairs.png)
+![Taxonomy](screenshots_new/rl_taxonomy.png)
+![Rewards](screenshots_new/rl_rewards.png)
+![Diagnostics](screenshots_new/rl_diagnostics.png)
+
+Four sub-tabs expose the RL signal data: DPO chosen/rejected pairs, the pattern taxonomy clusters, per-URL reward signal breakdowns, and the full TC diagnostic cards from the Improvement Agent.
+
+### KB Explorer Tab
+
+![KB Explorer](screenshots_new/kb_explorer.png)
+
+Stats grid showing total document chunks, unique pages indexed, and deduplication count. The hybrid RRF search box lets you query the KB directly with the same retrieval pipeline the evaluation uses.
 
 ---
 
 ## Extending the System
 
-### Adding a New Domain Bucket
+### Adding a New Chaos Archetype
 
-Edit the `DOMAIN_BUCKETS` list in `eval/test_generator.py`:
+1. Add the new archetype name to `AGENT_CHAOS_ARCHETYPES` in `models/test_case.py`
+2. Add it with a weight to `archetype_weights` in `config.py`
+3. Update the system prompt in `TestGenerator._fetch_single()` to describe what it means and what failure it simulates
 
-```python
-{
-    "name": "Cybersecurity & Threat Intel",
-    "family": "security",
-    "structural_categories": ["structured_data_extraction", "rapidly_changing", "pdf_document"],
-    "example_queries": [
-        "CVE-2026 critical vulnerabilities CVSS score list",
-        "NIST NVD top exploited vulnerabilities 2026 table"
-    ]
-}
+### Adding a New Knowledge Domain
+
+Add the domain string to the domain list in `TestGenerator._fetch_single()`'s system prompt.
+
+### Adding a Custom Rubric Dimension Family
+
+Add the routing keywords to the `_route_dimensions()` method in `eval/judge.py`, and add a corresponding `_run_p2_<family>()` method and entry in the `p2_coros` dict inside `evaluate()`.
+
+### Adjusting Archetype Weights at Runtime
+
+```env
+ARCHETYPE_WEIGHTS=none:0.20,temporal_ambiguity:0.25,multi_hop_compressed:0.20,keyword_stuffed:0.15,reformulation_drift:0.10,over_decomposed:0.05,copy_paste_artifact:0.05
 ```
-
-### Changing Scoring Weights
-
-Edit `config.py` or add env vars:
-
-```python
-coverage_weight: float = 0.25   # Increase for coverage-first evaluation
-ranking_weight: float = 0.35    # Increase for ranking-sensitive use cases
-scrape_weight: float = 0.40     # Increase for extraction-critical pipelines
-```
-
-### Adding a Custom Judge Dimension
-
-Add a new `async def _eval_custom(...)` method to `eval/judge.py` following the same pattern as `_eval_coverage`, `_eval_ranking`, and `_eval_scrape`. Include it in the `asyncio.gather()` call in `evaluate()` and incorporate its score into `overall`.
-
-### Connecting a Different Vector Store
-
-Replace `search_ir/qdrant_store.py` with any other vector store implementing `init_collection()`, `init_query_cache_collection()`, and `get_collection_stats()`. Update `search_ir/indexer.py` and `search_ir/retriever.py` to use the new client's upsert/query API.
 
 ---
 
-## License
+## Known Issues & Planned Improvements
 
-This software is licensed under the **[PolyForm Noncommercial License 1.0.0](./LICENSE)**.
-
-### Permitted (Non-Commercial) Use
-You are free to use, modify, and distribute this codebase for **noncommercial purposes**, including:
-- Personal research, study, and experimentation.
-- Academic and university research projects.
-- Open-source exploration, evaluation, and benchmarking.
-- Educational instruction and non-profit/charitable initiatives.
-
-### Prohibited (Commercial) Use
-Using this software for **commercial gain** is restricted without a separate agreement. This includes:
-- Integrating this evaluation framework into client consulting deliverables or paid services.
-- Deploying as a proprietary internal tool within a for-profit commercial organization to evaluate production scrapers.
-- Offering this system or modified versions of it as a paid SaaS or enterprise evaluation suite.
-
-For commercial licensing requests or enterprise usage exemptions, please contact the repository maintainers.
+This section documents known architectural gaps identified in the current implementation. These are candidates for the next development cycle.
 
 ---
 
-*Built with ❤️ using Firecrawl, BGE-M3, Qdrant, and OpenRouter.*
+### 🔴 P1 Agent Context Rot (Full Document Dumping)
+
+**What it is:** The P1 agent receives the *entire scraped markdown* of each URL as a single user prompt — including all boilerplate, navigation, footers, and off-topic content. For large pages (common in documentation, government sites, or news aggregators), this can exceed 50,000+ tokens per URL.
+
+**Why it's a problem:** Very long contexts cause LLMs to lose attention on information near the middle of the document ("lost in the middle" effect). The P1 agent may miss key claims buried in the middle of a large article even though the content is present. Additionally, large prompts are expensive and slow.
+
+**Planned fix:** Pre-truncate documents to the most query-relevant chunks using the KB hybrid RRF scores already computed before the P1 call. Send only the top-K chunks ranked by relevance to the P1 agent, with explicit chunk boundaries marked.
+
+---
+
+
+
+### 🔴 Dimension Routing is Keyword-Only with No Fallback Disambiguation
+
+**What it is:** `_route_dimensions()` assigns each rubric dimension to a P2 agent family by scanning the dimension's `name + criteria` text for keyword matches. If multiple keywords match (e.g., a dimension about "current data accuracy" could match both `freshness` and `precision`), the first matching branch wins due to `elif` chaining.
+
+**Why it's a problem:** Dimensions with overlapping criteria are silently misrouted. A `freshness` judge evaluating a `precision` dimension will apply the wrong evaluation philosophy even though the rubric criteria are identical. The routing is invisible to the operator.
+
+**Planned fix:** Add explicit `dimension_family` field to `RubricDimension` that the test generator sets at generation time. The router falls back to keyword matching only when this field is absent.
+
+---
+
+### 🟡 Improvement Agent Level-2 Context Window Risk
+
+**What it is:** The `_build_agent_input()` method in `ImprovementAgent` serializes the worst 10 TCs with full scrape evidence, all ranking disagreements, all per-TC diagnoses, and score histograms into a single JSON payload passed as the LLM prompt.
+
+**Why it's a problem:** For runs with 30+ test cases, this payload can approach the context limit of some models. The `glm-5.2` model (default for the Improvement Agent) has been observed returning truncated responses, which the code handles gracefully but silently degrades the quality of root cause analysis.
+
+**Planned fix:** Implement a two-pass summarization — run a lightweight pass to score and rank the most impactful items, then send only the top-N items in the full analysis prompt.
+
+---
+
+### 🟡 Query Cache Uses Dense-Only Similarity
+
+**What it is:** The L1 query cache lookup (`find_similar_query()`) was designed to use hybrid RRF (dense + sparse BM25) for similarity scoring — matching how the KB content search works. Currently only the dense BGE-M3 vector is used; the sparse component is computed by the embedder but not passed through to the cache lookup.
+
+**Why it's a problem:** Dense-only similarity can conflate queries that share semantic context but ask for different information (e.g., "current FDA drug approval process" vs. "current FDA drug approval statistics"). Both share high cosine similarity but the cached results may be entirely wrong for the second query. The sparse component would catch the keyword-level difference between "process" and "statistics" that the dense vector smooths over.
+
+**Planned fix:** Wire the sparse vector output from `EmbedderClient` into `find_similar_query()` to enable the intended hybrid RRF scoring. Raise the hit threshold correspondingly once hybrid scoring is active.
+
+---
+
+### 🟡 TC History Has No Archetype-Aware Stratification
+
+**What it is:** When sampling parent TCs for cache variant generation (`history.sample(n)`), the sampling is stratified only by recency (last 5 vs. older). It does not consider archetype distribution.
+
+**Why it's a problem:** If one archetype dominates recent history (e.g., 4 of the last 5 TCs are `temporal_ambiguity`), cache variants will inherit the same archetype, skewing the variant distribution away from the intended archetype weights.
+
+**Planned fix:** Stratify the parent sample by archetype to ensure variants proportionally represent the full archetype distribution.
+
+---
+
+
+
+### 🟢 Contrastive Fail Pairs Require URL Quality Annotations
+
+**What it is:** `ContrastiveFailPair` generation requires `url_quality_annotations` from the Improvement Agent's per-TC diagnosis. If the diagnosis LLM call fails or returns no annotations, no contrastive fail pairs are generated for that TC even if `contrastive_fail_triggered` was set by the P2 judge.
+
+**Why it's a problem:** The most interesting training pairs — those where a rubric failure pattern was triggered — may be silently dropped when the diagnosis agent is unavailable or over capacity.
+
+**Planned fix:** Make the `good_state` URL selection fall back to the highest P1 `query_relevance_score` URL when annotations are missing, rather than skipping pair generation entirely.
+
+---
+
+

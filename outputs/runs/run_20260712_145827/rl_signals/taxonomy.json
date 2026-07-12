@@ -1,0 +1,32 @@
+[
+  {
+    "issue": "authority_inversion_in_ranking",
+    "frequency": "67% (2/3 TCs)",
+    "description": "Low-authority pages (commercial blogs, forum threads, social media) with keyword-matching snippets consistently outrank high-authority official documentation and editorial sources. The ranker over-weights snippet relevance and under-weights domain authority and content completeness (word count, code block presence).",
+    "suggested_fix": "Introduce composite reranking: final_score = relevance \u00d7 (authority_score ^ 0.5) \u00d7 completeness_bonus, with a hard contrastive constraint preventing authority+relevance \u2264 0.5 pages from outranking authority+relevance \u2265 0.85 pages."
+  },
+  {
+    "issue": "boilerplate_noise_dominance",
+    "frequency": "67% (2/3 TCs)",
+    "description": "Navigation menus, cookie consent banners, language selectors, and social-media icon clusters dominate scraped content, inflating document length with non-substantive HTML and degrading fidelity scores. nav_link_ratio reaches 0.85 on affected pages.",
+    "suggested_fix": "Add DOM-based boilerplate removal: strip nav/footer/aside elements where link-to-text ratio > 0.5, remove cookie-banner and language-selector divs, and filter SVG/CDN image-link clusters before markdown serialization."
+  },
+  {
+    "issue": "scrape_fidelity_length_bias",
+    "frequency": "40% of scraped pages (2/5 in tc_95709ac0)",
+    "description": "The scrape fidelity scorer rewards raw content length over completeness \u2014 short-but-complete pages (Istio: 8026 chars, 10 code blocks) receive L1 scores (0.20) while long-but-truncated pages (Buoyant: 33616 chars, installation step missing) receive higher scores (0.60).",
+    "suggested_fix": "Replace length-proportional scoring with completeness-first heuristic: minimum 0.6 floor for content_completeness='complete', cap at 0.5 for 'appears_truncated', add code-block-presence bonus for technical pages."
+  },
+  {
+    "issue": "zero_content_ranking_retention",
+    "frequency": "33% (1/3 TCs, 2/5 pages)",
+    "description": "Pages where scraping returns zero content (content_length=0, has_content=false) retain their ranking positions \u2014 Reddit at rank 2 and Facebook at rank 4 in tc_44c68246. The ranker does not consume scrape-quality feedback to demote or filter empty pages.",
+    "suggested_fix": "Add a post-scrape ranking adjustment: pages with content_length=0 or has_content=false receive a rank penalty (drop to bottom 3 positions or filter entirely) before final result presentation."
+  },
+  {
+    "issue": "temporal_blindness_for_realtime_intent",
+    "frequency": "100% of real_time intent TCs (1/1)",
+    "description": "Real-time intent queries receive stale cached pages (3/5 pages from stale cache in tc_f6176000) and pages without extractable publication dates. The ranking signal is authority-aware but time-blind \u2014 no recency decay or date-extraction pipeline exists.",
+    "suggested_fix": "Add publication-date extraction from meta tags (article:published_time, og:updated_time) and visible date strings; enforce \u226424h cache TTL for real_time intent; apply recency-decay multiplier to ranking score for temporal queries."
+  }
+]

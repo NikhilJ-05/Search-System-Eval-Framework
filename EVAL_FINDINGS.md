@@ -1,35 +1,38 @@
-# Eval Findings: 30 TC Run — `run_20260701_152627`
+# Eval Findings: 30 TC Run — `run_20260712_180951`
 
-> **Deep analysis of the Firecrawl Eval Showcase's first 30-test-case cycle.** This document covers scoring outcomes, root causes, per-TC failure breakdowns, cache behavior, retrieval comparison, RL signal statistics, and a prioritized improvement roadmap with quick wins.
+> **Deep analysis of the EvalOS Framework's first run under the new P1/P2 multi-agent, rubric-first architecture.** This document covers scoring outcomes, root causes, per-TC failure breakdowns, cache behavior, chaos archetype analysis, retrieval comparison, RL signal statistics, and a prioritized improvement roadmap with quick wins.
 
 ---
 
-![Frontend Overview tab showing gauge rings and key run metrics](./screenshots/frontend_overview_gauge_rings.png)
+![EvalOS Live Pipeline — SSE event stream with live leaderboard](./screenshots_new/live_pipeline_streaming.png)
 
 ---
 
 ## Table of Contents
 
 1. [Run Metadata](#run-metadata)
-2. [Executive Summary](#executive-summary)
-3. [Score Distribution Analysis](#score-distribution-analysis)
-4. [Dimension Deep Dive](#dimension-deep-dive)
-   - [Coverage (Score: 0.92)](#coverage-score-092)
-   - [Ranking (Score: 0.88)](#ranking-score-088)
-   - [Scrape Quality (Score: 0.50) — The Critical Bottleneck](#scrape-quality-score-050--the-critical-bottleneck)
-5. [Two-Layer Cache Analysis](#two-layer-cache-analysis)
-6. [KB Build Progression](#kb-build-progression)
-7. [Retrieval Comparison: Firecrawl vs Internal KB vs Ideal](#retrieval-comparison-firecrawl-vs-internal-kb-vs-ideal)
-8. [Root Cause Analysis](#root-cause-analysis)
-9. [Per-TC Failure Catalog](#per-tc-failure-catalog)
-10. [Cross-Dimension Failure Patterns](#cross-dimension-failure-patterns)
-11. [RL Signal Statistics](#rl-signal-statistics)
-12. [Improvement Roadmap](#improvement-roadmap)
+2. [Architecture Context](#architecture-context)
+3. [Executive Summary](#executive-summary)
+4. [Score Distribution Analysis](#score-distribution-analysis)
+5. [Dimension Performance Breakdown](#dimension-performance-breakdown)
+   - [The Critical Bottleneck — `_baseline_fidelity`](#the-critical-bottleneck--_baseline_fidelity)
+   - [Ranking — `_baseline_ranking`](#ranking--_baseline_ranking)
+   - [Custom Rubric Dimensions](#custom-rubric-dimensions)
+6. [Chaos Archetype Analysis](#chaos-archetype-analysis)
+7. [Intent × Difficulty Analysis](#intent--difficulty-analysis)
+8. [Two-Layer Cache Analysis](#two-layer-cache-analysis)
+9. [KB Build Progression](#kb-build-progression)
+10. [Retrieval Comparison: Firecrawl vs Internal KB vs Ideal](#retrieval-comparison-firecrawl-vs-internal-kb-vs-ideal)
+11. [Root Cause Analysis](#root-cause-analysis)
+12. [Per-TC Failure Catalog](#per-tc-failure-catalog)
+13. [Cross-Dimension Failure Patterns](#cross-dimension-failure-patterns)
+14. [RL Signal Statistics](#rl-signal-statistics)
+15. [Improvement Roadmap](#improvement-roadmap)
     - [Engineering Proposals](#engineering-proposals)
     - [Quick Wins](#quick-wins)
-13. [Judge Bias Warnings](#judge-bias-warnings)
-14. [Test Case Category & Intent Breakdown](#test-case-category--intent-breakdown)
-15. [Conclusions & Next Steps](#conclusions--next-steps)
+16. [Judge Bias Warnings](#judge-bias-warnings)
+17. [Regression vs Previous Run](#regression-vs-previous-run)
+18. [Conclusions & Next Steps](#conclusions--next-steps)
 
 ---
 
@@ -37,35 +40,63 @@
 
 | Field | Value |
 |-------|-------|
-| **Run ID** | `run_20260701_152627` |
-| **Generated** | 2026-07-01 at 16:29:04 IST |
+| **Run ID** | `run_20260712_180951` |
+| **Started** | 2026-07-12 at 18:09:51 IST |
+| **Completed** | 2026-07-12 at 19:22:12 IST |
+| **Duration** | 72 minutes 21 seconds |
 | **Total Test Cases** | 30 |
-| **Batch Size** | 1 (one TC generated and executed per round) |
-| **Generator Model (LLM-A)** | `deepseek/deepseek-v4-flash` |
-| **Judge Model (LLM-B)** | `qwen/qwen3-235b-a22b-instruct` |
-| **Pass Threshold** | 0.80 |
+| **Generator Model (LLM-A)** | `minimax/minimax-m3` |
+| **P1 Model (Document Profiler)** | `deepseek/deepseek-v4-flash` |
+| **P2 Model (Dimension Scorer)** | `deepseek/deepseek-v4-flash` |
+| **Improvement Agent (LLM-C)** | `z-ai/glm-5.2` |
+| **Pass Threshold** | `0.65` (floor: `0.40`) |
 | **Qdrant Collection** | `firecrawl_eval` |
-| **Run Output** | `outputs/runs/run_20260701_152627/` |
+| **Run Output** | `outputs/runs/run_20260712_180951/` |
+
+---
+
+## Architecture Context
+
+This run is the **first full run under the new P1/P2 multi-agent, rubric-first architecture**. Key differences from the previous run (`run_20260701_152627`):
+
+| Component | Previous Run | This Run |
+|-----------|-------------|----------|
+| Judge | Single 3-pass LLM (Coverage, Ranking, Scrape) | P1 per-document profilers × N + P2 dimension scorers × 5 families |
+| Rubric | Hardcoded 3-axis (Coverage 25%, Ranking 35%, Scrape 40%) | Dynamic per-TC rubric authored by test generator (2–4 custom dimensions) |
+| Pass Gate | Overall ≥ 0.80 | Overall ≥ 0.65 AND no dimension < 0.40 (floor gate) |
+| Domains | 13 | 16 (added Cybersecurity, Pharmaceuticals, Real Estate) |
+| Chaos Archetypes | None | 7 (temporal_ambiguity, multi_hop_compressed, etc.) |
+| RL Signals | 3 types (DPO, Rewards, Taxonomy) | 7 types (+ Listwise, Contrastive Fail, Query Reformulations, SFT Gold, Scrape Labels) |
+| Cache Variants | None | 35% of TCs are cache relationship variants |
+| Generator | `deepseek/deepseek-v4-flash` | `minimax/minimax-m3` |
 
 ---
 
 ## Executive Summary
 
 ```
-Overall Score:  0.73  🟡  (17% pass rate — 5/30 TCs passed)
+Overall Score:  0.69  🟡  (0% pass rate — 0/30 TCs passed)
 
-Dimension Scores (weighted):
-  Coverage    0.92  ✅  (weight: 0.25)  ───────────────────────────── 92%
-  Ranking     0.88  ✅  (weight: 0.35)  ──────────────────────────── 88%
-  Scrape      0.50  ❌  (weight: 0.40)  ─────────────────────── 50%
-                              ▲
-                     THE PRIMARY FAILURE POINT
+Baseline Dimension Scores (across all TCs, where applied):
+  _baseline_fidelity   0.40  ❌  ─────────── 40% — CRITICAL BOTTLENECK
+  _baseline_ranking    0.48  🟡  ──────────────── 48%
+  _baseline_coverage   0.69  ✅  ─────────────────────────── 69%
+  _baseline_authority  0.73  ✅  ──────────────────────────────── 73%
+  _baseline_freshness  0.81  ✅  ──────────────────────────────────────── 81%
+
+  Floor fails: 30/30 TCs triggered ≥1 dimension floor (< 0.40)
+  Most common floor dimension: _baseline_fidelity (34 evaluations)
 ```
 
 **The story this run tells in one sentence:**
-> Firecrawl is excellent at *finding* the right content (coverage 0.92) and returning it in *roughly the right order* (ranking 0.88), but the scraped markdown is frequently unusable because of JavaScript-rendered tables that don't load and content truncation that cuts pages mid-sentence.
+> The new rubric-first, P1/P2 architecture is correctly diagnosing Firecrawl's scrape-quality failures with granular precision, but the P1 agent's scrape scoring function is systematically **inverting quality** — complete documents with faithful content receive 0.20 (L1) while truncated social media posts receive 0.79 (L4) — causing the floor gate to fire on every single test case and producing a 0% pass rate that does not reflect the actual retrieval quality of the system.
 
-The scrape dimension alone is dragging the overall score from what would be ~0.82 (a passing grade) down to 0.73. The 25 failing test cases all share at least one scrape-side failure; only 5 TCs managed to score ≥ 0.80 across all three dimensions simultaneously.
+The 0% pass rate has two distinct causes:
+
+1. **A real problem:** Social media content (Facebook, Reddit, Instagram) is consistently ranked above authoritative sources, and large multi-hop queries fail to retrieve all required data hops.
+2. **A calibration defect:** The P1 agent's `scrape_score` computation is inverted for roughly 10/30 TCs — pages explicitly described as "faithfully preserving all content" score L1 (0.20) while truncated 17–25 word posts score L4 (0.79). This cascades directly into `_baseline_fidelity` floor failures.
+
+Correcting the calibration defect alone (Quick Win #1) would likely push 10–15 TCs above the pass threshold.
 
 ---
 
@@ -76,488 +107,497 @@ The scrape dimension alone is dragging the overall score from what would be ~0.8
 ```
 Score Range   Count   Bar
 ─────────────────────────────────────────────────
-0.80 – 1.00   5  TCs  ███████
-0.70 – 0.79  18  TCs  ████████████████████████
-0.60 – 0.69   5  TCs  ███████
-0.50 – 0.59   2  TCs  ███
-0.00 – 0.49   0  TCs
+0.90 – 1.00   3  TCs  █████
+0.80 – 0.89   4  TCs  ███████
+0.70 – 0.79   8  TCs  ████████████
+0.60 – 0.69  10  TCs  ████████████████
+0.50 – 0.59   4  TCs  ███████
+0.30 – 0.49   1  TCs  ██
 ─────────────────────────────────────────────────
 ```
 
-The distribution is notably **tight around 0.70–0.79** (60% of TCs). This is not random variance — it reflects a systematic pattern: coverage and ranking are fine, scrape fails partially on almost every TC, pulling all scores into the same narrow band.
+Despite the 0% pass rate, scores are broadly distributed. 7 TCs scored ≥ 0.80 but all were blocked by dimension floor failures, most commonly the fidelity dimension falling below 0.40 due to the score inversion bug.
 
-### Coverage Score Distribution
+### By Intent
 
-```
-Score Range   Count   Bar
-─────────────────────────────────────────────────
-0.80 – 1.00  27  TCs  ██████████████████████████████████████
-0.60 – 0.79   1  TCs  █
-0.40 – 0.59   2  TCs  ██
-─────────────────────────────────────────────────
-```
+| Intent | TCs | Avg Score | Pass Rate |
+|--------|-----|-----------|-----------|
+| `data_extraction` | 4 | 0.60 | 0.0% |
+| `comparative_research` | 8 | 0.60 | 0.0% |
+| `tutorial_howto` | 3 | 0.61 | 0.0% |
+| `exploratory` | 9 | 0.72 | 0.0% |
+| `factual_lookup` | 6 | 0.85 | 0.0% |
 
-Coverage is overwhelmingly strong. The 3 outliers (scores below 0.80) are cases where search literally failed to retrieve results from official authoritative domains (see TC catalog: `tc_6b53cb03`, `tc_bd1bd260`, `tc_02b1edeb`).
-
-### Ranking Score Distribution
-
-```
-Score Range   Count   Bar
-─────────────────────────────────────────────────
-0.80 – 1.00  24  TCs  █████████████████████████████████
-0.60 – 0.79   5  TCs  ███████
-0.40 – 0.59   1  TCs  █
-─────────────────────────────────────────────────
-```
-
-Ranking is also strong. The 6 sub-0.80 outliers share a common pattern: the system ranks social media (Instagram, Facebook, Reddit, YouTube) or general-purpose news articles above authoritative official sources for queries that explicitly name an institution or official body.
+`data_extraction` and `comparative_research` are the hardest — both require multi-hop retrieval that the current pipeline doesn't support.
 
 ---
 
-## Dimension Deep Dive
+## Dimension Performance Breakdown
 
-### Coverage (Score: 0.92)
+![Overview Gauge Rings — Dimension scores per run](./screenshots_new/overview_rings.png)
 
-**What worked well:**
-- The Firecrawl search index consistently surfaces pages containing the `must_mention` entities across all domains (healthcare, finance, government, tech, environment)
-- Recall is near-perfect because Firecrawl's broad web search casts a wide net — entity terms appear in snippets or page content for almost every query
+The dynamic rubric system produced 50+ unique dimension names across the 30 TCs. The table below shows all dimensions that appeared, sorted by average score ascending (worst first).
 
-**What failed (8% of cases):**
+### Worst-Performing Custom Dimensions (Avg < 0.40)
 
-| TC ID | Query (excerpt) | Missing Terms | Root Cause |
-|-------|----------------|---------------|-----------|
-| `tc_6b53cb03` | Japan Rail Pass July 2026… | `JR_East`, `JR_West`, `JR_Kyushu` | Official regional JR sites never returned in results |
-| `tc_bd1bd260` | Global temperature anomaly… NOAA NASA GISS | `NASA_GISS` | NASA GISS surface temperature page not indexed/retrieved |
-| `tc_02b1edeb` | Cruise cabin sizes Royal Caribbean vs Norwegian | `Norwegian_Cruise_Line` | Search missed NCL official domain entirely |
-| `tc_eb136550` | Amazon deforestation INPE PRODES | `PRODES` | "INPE" retrieved but its sub-program "PRODES" never found |
+| Dimension | Avg Score | Floor Fails | Primary Cause |
+|-----------|-----------|-------------|---------------|
+| `real_world_vs_theoretical` | 0.15 | 1 | Retrieval returns only theoretical frameworks, no applied case studies |
+| `whole_grain_compatibility` | 0.15 | 1 | No documents address whole grain interaction with binders/starches |
+| `structural_fidelity` | 0.22 | 2 | Markdown conversion loses tables, headings, and nested lists |
+| `data_completeness` | 0.25 | 3 | Multi-hop queries missing 2nd/3rd data hop entirely |
+| `multi_hop_synthesis` | 0.28 | 3 | Single-hop retrieval cannot satisfy compound comparative intent |
+| `comparative_context_recovery` | 0.28 | 2 | Over-decomposed queries return single-entity results only |
+| `actionability` | 0.30 | 1 | Tutorial intent queries retrieve explanatory content, not step-by-step guides |
+| `multi_constraint_coverage` | 0.35 | 1 | No single result set satisfies all constraints simultaneously |
 
-**Pattern:** Coverage fails when the query contains **multiple explicit organization names** and Firecrawl's search misses one of them. The search finds *some* organizations but not all — particularly regional or sub-entity names (JR East vs JR Pass general, PRODES vs INPE general).
+### Best-Performing Custom Dimensions (Avg ≥ 0.85)
 
-**Insight:** Firecrawl's search performs keyword-style entity matching. When a query says "A vs B vs C", it may rank results that mention A and B but not C — and no single result covers all three.
+| Dimension | Avg Score | Pass Rate |
+|-----------|-----------|-----------|
+| `topical_coverage` | 0.85 | 100% |
+| `topical_substance` | 0.85 | 100% |
+| `comparative_coverage` | 0.85 | 100% |
+| `practical_recommendations` | 0.86 | 100% |
+| `topical_coherence` | 0.88 | 100% |
+| `destination_specificity` | 0.90 | 100% |
+| `completeness` | 0.90 | 100% |
+| `practical_examples` | 0.93 | 100% |
+| `noise_filtering` | 0.95 | 100% |
+| `drift_recovery` | 0.95 | 100% |
 
----
-
-### Ranking (Score: 0.88)
-
-**What worked well:**
-- For queries with a clear authoritative source (CDC, IRS, Federal Reserve), Firecrawl reliably surfaced the official page in the top 2
-- Source diversity is good: the top-5 results typically include the official domain, a secondary analysis site, and a community/forum source
-
-**What failed (12% of cases):**
-
-The Judge's ideal ranking consistently differed from Firecrawl's actual ranking in **two systematic patterns**:
-
-#### Pattern A: Social Media Over Authority (for data extraction queries)
-
-| Query | Firecrawl Rank 1 | Ideal Rank 1 | Gap |
-|-------|-----------------|-------------|-----|
-| Goldman Sachs stock picks | Yahoo Finance | GoldmanSachs.com | Authority mismatch |
-| Goldman Sachs stock picks (variant) | Yahoo Finance | GoldmanSachs insights | Missing source-entity boosting |
-| Cruise cabin sizes | Facebook post | Royal Caribbean official | Social media over official |
-| UC Berkeley admit rates | Facebook (UC page) | Official UC dashboard | Domain authority miss |
-| ENSO July 2026 forecast | CPC PDF | CPC advisory discussion page | Document type mismatch |
-
-For data extraction queries, Firecrawl's ranking appears to weight keyword density and engagement signals, not source authority. A Facebook post from a university's official page ranks equal to or above the university's own `.edu` dashboard.
-
-#### Pattern B: Generic Page Over Specific Page (same domain)
-
-| Query | Ranked Highly | Should Rank Higher |
-|-------|--------------|-------------------|
-| CDC adult immunization schedule | CDC notes/supplementary page | CDC schedule-by-age page |
-| CDC vaccines (variant) | CDC child schedule | CDC adult easy-read page |
-| Goldman Sachs July 2026 picks | Goldman general markets hub | Goldman insights article |
-| QS Rankings 2026 engineering | QS general subject ranking | QS engineering-technology page |
-
-Within the same domain, Firecrawl doesn't distinguish between a specific, query-relevant page vs. a generic hub page. The generic hub often has more backlinks and engagement, so it ranks higher.
+Firecrawl excels at topical coverage, source coherence, and fact-level completeness for clean queries. The system reliably finds the right general content; it fails at structured data extraction, scrape fidelity, and authority-ranked ordering.
 
 ---
 
-### Scrape Quality (Score: 0.50) — The Critical Bottleneck
+### The Critical Bottleneck — `_baseline_fidelity`
 
-This is where the run fell apart. With a weight of 0.40, a scrape score of 0.50 alone depresses the overall score by ~0.20 points.
+Average score: **0.40** (barely at the floor). Applied to all 30 TCs. 34 evaluations triggered floor failure.
 
-![Frontend Test Cases tab with a failing TC expanded to show diagnosis](./screenshots/frontend_tc_expanded_diagnosis.png)
+**Root cause: P1 scrape_score inversion.**
 
-#### Root Cause 1: JavaScript-Rendered Tables Not Captured (15/30 TCs)
+The P1 agent computes a `scrape_score` per URL, which `_baseline_fidelity` then aggregates as:
 
-**What happens:** Firecrawl uses static HTML-to-markdown conversion. When page content is rendered by JavaScript after page load (e.g., React/Vue SPAs, data tables loaded via fetch calls), Firecrawl's scraper sees only the skeleton HTML — the `<div>` containers where the table would be, but no actual `<tr>` rows or `<td>` data.
+```
+fidelity = 0.70 × mean(scrape_scores) + 0.30 × min(scrape_scores)
+```
 
-**Affected domains:** Finance (Yahoo Finance stock tables), Education (QS rankings, UC admit dashboards), Government (CDC immunization tables, NOAA CPC forecast tables), Travel (JR Pass price comparison pages)
+In at least 10 TCs, the P1 agent's `scrape_score` values are systematically inverted relative to actual content quality:
 
-**Evidence from TCs:**
+| TC ID | URL | word_count | content_completeness | scrape_score | scrape_reasoning |
+|-------|-----|------------|----------------------|--------------|-----------------|
+| `tc_531d905d` | Formula 1 Wikipedia | 3,000+ | `complete` | **0.20** | "faithfully reproduces all visible text" |
+| `tc_531d905d` | Instagram reel | 26 | `appears_truncated` | **0.79** | "Content is heavily truncated, only opening line visible" |
+| `tc_a7f33ea8` | Harvard health | 1,200+ | `complete` | **0.20** | "faithfully captures all textual content" |
+| `tc_a7f33ea8` | Facebook post | 25 | `appears_truncated` | **0.79** | "ends mid-sentence" |
+| `tc_e4e371ec` | healthdirect.gov.au | 900+ | `complete` | **0.20** | "No critical discrepancies detected" (issues=[]) |
+| `tc_9695f75c` | YouTube transcript | 2,004 | `complete` | **0.20** | "Full video transcript...successfully extracted" |
+| `tc_d6ace918` | PubMed article | 3,000+ | `complete` | **0.20** | "faithfully preserves the full text" |
+| `tc_d6ace918` | Facebook NIH post | 23 | `appears_truncated` | **0.60** | truncated |
 
-> `tc_f0d17d75` — "Goldman Sachs top stock picks July 2026": *"Rank 1 (Yahoo Finance) scrape missed the stock selection table because dynamic JavaScript content was not rendered, and the markdown was truncated mid-sentence."*
+The scrape_score computation appears to be applying penalties for cosmetic issues (alt-text gaps, nav links, embedded media) as if they were critical failures, while simultaneously under-penalizing severe truncation and empty content on social media pages.
 
-> `tc_de5e4df4` — "QS World University Rankings 2026 engineering top 50": *"All scrapes suffered from missing elements due to lazy-loaded ranking tables, truncated markdown, and noise from filter UI."*
+**Impact of the inversion:** Every TC where this occurs shows an aggregated fidelity score of 0.20–0.35 (L1–L2), triggering the floor gate and failing the TC even when other dimensions score L4–L5.
 
-> `tc_91464a3b` — "UC Berkeley UCLA San Diego 2026 freshman admit rates": *"Official UC page requires JavaScript to render tables, so only descriptive text was scraped (score 0.55)."*
+**Also note:** In several TCs, `_baseline_fidelity` is evaluated **twice** — once by the Fidelity aggregation path and once by a P2 agent that routed a custom dimension matching "fidelity". TC `tc_a345a697` scores 0.9 (L5) on the first evaluation and 0.312 (L2) on the second for the same document set. This is a routing conflict, not judge inconsistency.
 
-#### Root Cause 2: Content Truncation (12/30 TCs)
+---
 
-**What happens:** Firecrawl's markdown conversion has an implicit character limit. For long pages (government regulations, CDC schedule tables with 20+ vaccine rows, ECB policy documents), the scraper produces markdown that ends mid-sentence, mid-table, or mid-list.
+### Ranking — `_baseline_ranking`
 
-**Affected domains:** Health (CDC immunization schedules), Legal (EU Digital Services Act, California ACF regulation, USPTO rules), Finance (Federal Reserve dot plot), Science (ENSO forecast tables, global temperature data)
+Average score: **0.48** (marginal). Applied to 30 TCs. 15 evaluations triggered floor failure.
 
-**Evidence from TCs:**
+Score distribution:
+- L1 (0.00–0.20): 2 TCs (13% + 15% = Facebook/Reddit at rank 1)
+- L2 (0.20–0.40): 13 TCs — most common band
+- L3 (0.40–0.60): 6 TCs
+- L4 (0.60–0.80): 5 TCs
+- L5 (0.80–1.00): 4 TCs
 
-> `tc_4d66dfdf` — "CDC adult immunization schedule 2026": *"Result 1 truncated mid-table, missing Influenza, Pneumococcal, Hepatitis, Meningococcal, Hib, Mpox, and IPV rows."*
+**Dominant failure: social media content at rank 1.**
 
-> `tc_688a509c` — "State privacy law comparison CCPA vs CPA vs VCDPA": *"khlaw.com truncated table, Bloomberg Law missing comparison table altogether, Osano only covers California."*
+In 13 of 30 TCs, the most relevant and authoritative source was buried behind a Facebook post, Reddit thread, or Instagram reel that ranked first. The pattern is consistent across domains:
 
-#### Root Cause 3: Paywalls and Access Blocks (4/30 TCs)
+| TC | Query Topic | Rank 1 (actual) | Auth | words | Ideal Rank 1 |
+|----|------------|----------------|------|-------|--------------|
+| `tc_3b095b54` | Lisbon travel guide | Instagram reel | 0.1 | 25 | travelforlifenow.com (auth 0.6, 3783w) |
+| `tc_c6c18688` | Lisbon cultural history | Facebook post | 0.2 | 23 | debritoproperties.com (auth 0.5) |
+| `tc_0c0014af` | Fossil fuel + climate | UN/IEA overview | 0.9 | — | multi-hop source (doesn't exist in results) |
+| `tc_39808d09` | Dividend portfolio | Reddit thread | 0.1 | 24 | bogleheads.org (auth 0.85, rel 0.95) |
+| `tc_5cad7b97` | Iceland Northern Lights | Reddit comment | 0.2 | 17 | nordicvisitor.com (auth 0.6, rel 0.95) |
+| `tc_0aff21d2` | Byzantine Empire fall | Facebook post | 0.2 | 25 | Wikipedia + academic (in result set) |
+| `tc_a024035f` | Gluten-free baking | Facebook post | 0.2 | 19 | YouTube (auth 0.6, rel 0.7) |
+| `tc_b7028fb4` | Concert production crew | Instagram reel | 0.3 | 23 | YouTube (auth 0.8, rel 0.95) |
+| `tc_69806b76` | Ancient Egypt discoveries | Travel blog | 0.4 | — | penn.museum (auth 1.0, rel 0.9) |
 
-**What happens:** For specialized legal, financial, and regulatory content, the top-ranked URLs are behind paywalls (Bloomberg Law, Practical Law, PatentlyO) or login walls (USPTO portal). Firecrawl returns an error or an empty/navigation-only page.
+The most unambiguous evidence that this is a **Firecrawl ranking problem** (not a retrieval problem): in 8 of these 9 cases, the ideal Rank 1 document **is present in the result set** — it was found by the search, it was scraped, it scored high on P1 relevance — but it appears at Rank 3, 4, or 5 instead of Rank 1.
 
-**Evidence from TCs:**
+---
 
-> `tc_aadb30d9` — "USPTO patent term adjustment rules 2026": *"USPTO portal results are behind login, PatentlyO is paywalled, bipc.com completely failed (Cloudflare error). Expected elements 'data_tables' and 'statutory_regulatory_citations' are missing from all results."*
+### Custom Rubric Dimensions
 
-> `tc_f0d17d75` — "Goldman Sachs stock picks": *"Rank 2 (Goldman Sachs) pointed to a generic markets hub lacking any stock pick tables."*
+The new rubric-first architecture produces TC-specific dimensions that probe exactly the failure mode relevant to each archetype. Below are the most significant findings per dimension family:
 
-#### Root Cause 4: PDF Parsing Limitations (2/30 TCs)
+**Coverage-family dimensions (avg 0.64–0.90):** Strong for topical and breadth queries. Weak for multi-hop compound queries requiring synthesis across 2+ data sources.
 
-**What happens:** When the top result is a PDF (Federal Reserve dot plot, ENSO CPC advisory), Firecrawl converts it to markdown but loses table structure, column alignment, and numeric precision.
+**Freshness-family dimensions (avg 0.55–0.81):** Temporal queries perform well for content freshness detection. Failure occurs when documents have no `publication_date` metadata despite containing explicit date references in body text. P1's temporal extraction works, but `recency_signals` scoring requires structured `publication_date` to trigger correctly.
 
-**Evidence:**
+**Authority-family dimensions (avg 0.73–0.84):** Generally strong. Fails predictably when social media domains appear in top-3 results — their `authority_score` is accurate (0.1–0.3) but the ranking doesn't penalize them.
 
-> `tc_08a1ff59` — "Federal Reserve dot plot June 2026 FOMC projections": *"The top result is a PDF which can introduce noise, formatting irregularities, and table parsing errors."*
+**Precision-family dimensions (avg 0.25–0.72):** Wide spread. Quantitative queries fail when the specific data isn't in any scraped document (`data_completeness` avg 0.25). Queries for publicly available structured data (F1 calendar, sugar guidelines) succeed.
 
-#### Root Cause 5: Missing Authoritative Domains (6/30 TCs)
+---
 
-**What happens:** The search misses the specific authoritative page entirely. Even if the domain is retrieved for some queries, the specific sub-page with the structured data (the "insights" article, the "data" endpoint, the "by-age" schedule page) is never returned.
+## Chaos Archetype Analysis
+
+| Archetype | TCs | Avg Score | Notes |
+|-----------|-----|-----------|-------|
+| `multi_hop_compressed` ⚠️ | 3 | **0.51** | Worst performer — single-hop retrieval can't answer 3-hop queries |
+| `over_decomposed` ⚠️ | 5 | **0.61** | Query too narrow; comparative context missing from results |
+| `reformulation_drift` ⚠️ | 5 | **0.64** | Intent eroded; results are topically adjacent but don't answer the query |
+| `none` ⚠️ | 7 | **0.69** | Clean queries still fail — primarily due to fidelity inversion bug |
+| `keyword_stuffed` ⚠️ | 3 | **0.70** | Noise in query hurts precision but search still finds broadly relevant content |
+| `temporal_ambiguity` ⚠️ | 7 | **0.85** | Best performer — Firecrawl handles "current/latest" queries well |
+| *(copy_paste_artifact)* | 0 | — | Not sampled this run |
+
+**Key finding:** `temporal_ambiguity` queries score highest (0.85) because Firecrawl's index is relatively fresh and the P1 agent's temporal extraction is strong. `multi_hop_compressed` queries score lowest (0.51) because no retrieval system can satisfy 3-hop queries without explicit decomposition.
+
+The archetype system is working as designed — it surfaces architectural gaps in the search pipeline that clean queries would miss.
+
+---
+
+## Intent × Difficulty Analysis
+
+### By Difficulty
+
+| Difficulty | TCs | Avg Score | Pass Rate |
+|------------|-----|-----------|-----------|
+| `hard` | 7 | 0.63 | 0.0% |
+| `medium` | 23 | 0.70 | 0.0% |
+| *(no easy TCs generated)* | — | — | — |
+
+No "easy" test cases were generated this run — the generator defaulted to medium/hard. This is expected with the new archetype weights that skew toward more adversarial query patterns.
 
 ---
 
 ## Two-Layer Cache Analysis
 
-![Frontend Report tab showing Cache Analytics and L1/L2 metrics](./screenshots/frontend_report_cache_section.png)
-
 ### Layer 1 — Query Cache
 
 | Metric | Value |
 |--------|-------|
-| **Hit Rate** | 26.7% (8 out of 30 TCs) |
-| **Threshold Used** | 0.82 cosine similarity |
-| **Max Age** | 6000 seconds |
+| **Hit Rate** | 6.7% (2/30 TCs) |
+| **Threshold Used** | 0.95 cosine similarity |
+| **Max Age** | 3600 seconds (1 hour) |
 
-8 test cases returned a Layer 1 cache hit — meaning their query was semantically close enough (≥0.82 cosine) to a previously executed query. All 8 were **`semantic_near_miss`** cache-intent variants generated specifically to exercise the cache.
+2 TCs triggered L1 cache hits — both were `exact_duplicate` cache relationship variants. This is correct: only verbatim or near-verbatim queries should hit the query cache at the 0.95 threshold.
 
-### Layer 2 — KB Content Cache
+### Layer 2 — KB Semantic Cache
 
 | Metric | Value |
 |--------|-------|
-| **Hit Rate** | 0.0% (0 out of 128 URL checks) |
-| **URLs Checked** | 128 (approximately 5 URLs × 30 TCs - cache hits) |
+| **Hit Rate** | 13.0% (16/123 URL checks) |
 
-**Why 0% Layer 2 hits?**
-
-This is expected and correct. The run executes sequentially (one TC at a time). The KB builds from scratch, and with a `KB_FRESHNESS_WINDOW=600s`, content indexed for TC N is only eligible for reuse in TC N+1 if TC N+1 executes within 10 minutes. With 30 sequential cases and LLM call times, runs are spaced far apart enough that by the time a URL would get re-queried, its KB entry has expired.
-
-The 0% Layer 2 rate is not a bug — it indicates the cache is behaving correctly: it's not reusing stale content, and the 30 rounds were diverse enough that URL overlap across rounds was minimal.
+The 13% L2 hit rate is notable — this is the **first run with observable L2 cache activity**. URLs indexed from earlier TCs were successfully retrieved from Qdrant for later TCs using hybrid RRF scoring, avoiding re-scraping.
 
 ### Cache Intent Validation
 
-| Generator Intent | Count | Query Cache Hit % | Content Hit % |
-|-----------------|-------|------------------|---------------|
-| `novel` | 21 | 0.0% | 0.0% |
-| `semantic_near_miss` | 9 | 88.9% | 0.0% |
+| Generator Intent | Count | Query Hit % | Content Hit % |
+|------------------|-------|-------------|---------------|
+| `novel` | 20 | 0.0% | 0.0% |
+| `rephrased_same_intent` | 3 | 0.0% | 45.5% |
+| `same_source_different_angle` | 2 | 0.0% | 0.0% |
+| `exact_duplicate` | 2 | **100.0%** | **100.0%** |
+| `subset_of_parent` | 3 | 0.0% | 14.3% |
 
-**Result: Cache intent validation PASSED.** Novel queries never triggered cache hits (correct — they were designed to be unique). 88.9% of `semantic_near_miss` variants correctly triggered cache hits (the generator successfully created near-duplicate rephrasings that landed above the 0.82 threshold).
+**Findings:**
+- `exact_duplicate` variants correctly hit both cache layers (expected — verbatim queries should always cache hit)
+- `rephrased_same_intent` variants achieved 45.5% L2 content hit — the KB semantic match is working for URL-level content reuse even when the query phrasing differs
+- `same_source_different_angle` achieved 0% L2 hit — correct, since a different angle of the same source may need different document chunks that aren't semantically similar to the cached angle's query embedding
+- `subset_of_parent` at 14.3% L2 — the parent documents aren't always relevant enough to the sub-query to exceed the RRF threshold
 
-The 1 `semantic_near_miss` that missed (11.1%) produced a query that was semantically different enough from its anchor to fall below the threshold — a meaningful near-miss edge case that validates the cache threshold's selectivity.
+**Concern — all rounds indexed 0 new documents:** The KB build progression table (below) shows every round indexed 0 new chunks. This indicates the Qdrant indexer was not writing to the KB during this run, likely due to a connection or configuration issue. The L2 hits observed may have been from a prior run's residual KB data.
 
 ---
 
 ## KB Build Progression
 
-The knowledge base grew from 0 to ~430 chunks across 30 rounds. The batch progression table below shows how content accumulated:
+| Round | TCs | New Indexed | Deduped (Hits) |
+|-------|-----|-------------|----------------|
+| 1–30 | 1 each | **0** all | 0 all |
 
-![Frontend KB Explorer tab showing vector collection statistics and search](./screenshots/frontend_kb_explorer_stats.png)
+**⚠️ All 30 rounds indexed 0 new chunks.** This is anomalous and warrants investigation. Possible causes:
+1. Qdrant URL not configured or unreachable during indexing (check `session.log`)
+2. Indexing background task silently failed due to exception handling swallowing errors
+3. All URLs were already in the KB from the prior run (unlikely — previous run used different query corpus)
 
-| Round | New Indexed | Deduped (Hits) | Notes |
-|-------|-------------|---------------|-------|
-| 1 | 20 | 0 | Fresh KB — all content new |
-| 2 | 20 | 0 | |
-| 3 | 16 | 0 | |
-| 4 | **0** | 0 | Query returned mostly empty/blocked pages |
-| 5 | 18 | 0 | |
-| 6 | 19 | 0 | |
-| 7 | 11 | 0 | |
-| 8 | 15 | 0 | |
-| 9 | **0** | 0 | Query returned mostly empty/blocked pages |
-| 10 | 7 | 0 | |
-| 11 | 0 | **20** | First significant dedup — content already in KB |
-| 12 | 19 | 0 | |
-| 13 | **0** | 0 | Blocked/empty scrapes |
-| 14 | 22 | 0 | |
-| 15 | 22 | 0 | |
-| 16 | 25 | 0 | Peak single-round indexing |
-| 17 | 0 | **19** | Semantic near-miss variant — reused cached query + KB |
-| 18 | 25 | 0 | |
-| 19 | 20 | 0 | |
-| 20 | 10 | **15** | Mixed: some new, some deduped |
-| 21 | 16 | 0 | |
-| 22 | 11 | 0 | |
-| 23 | 18 | 0 | |
-| 24 | 0 | **15** | Another near-miss — mostly cache hit |
-| 25 | 15 | 0 | |
-| 26 | 0 | **25** | Strong dedup — semantically similar domain content |
-| 27 | 21 | 0 | |
-| 28 | 20 | 0 | |
-| 29 | 0 | **19** | Near-miss batch — content already indexed |
-| 30 | 22 | 0 | |
-
-**Key observations:**
-- **Rounds 4, 9, 13** indexed 0 new chunks — these are the access-blocked or empty-scrape TCs (USPTO portal, paywalled content, SPA-only pages)
-- **Rounds with high dedup (11, 17, 20, 24, 26, 29)** are the `semantic_near_miss` variant rounds — they correctly found KB content and didn't re-scrape
-- The KB grew to approximately **430 net new chunks** across 30 rounds
+The 0-indexing does not affect scoring (the judge calls Firecrawl directly, not the KB), but it means no knowledge base is being built for future L2 cache efficiency.
 
 ---
 
 ## Retrieval Comparison: Firecrawl vs Internal KB vs Ideal
 
-This is the most strategically important finding of the run.
+![KB Explorer — Hybrid RRF search and collection stats](./screenshots_new/kb_explorer.png)
 
-| Metric | Firecrawl Native | Internal KB (RRF) | Winner |
-|--------|-----------------|------------------|--------|
-| **Kendall's τ (vs Ideal)** | **0.453** | -0.367 | 🏆 **Firecrawl** |
-| **Overlap@3 (vs Ideal)** | **0.711** | 0.322 | 🏆 **Firecrawl** |
+| Metric | Firecrawl | Internal KB | Winner |
+|--------|-----------|-------------|--------|
+| **Kendall's τ (vs Ideal, normalized 0→1)** | **0.543** | 0.533 | 🏆 Firecrawl |
+| **Overlap@3 (vs Ideal)** | **0.644** | 0.367 | 🏆 Firecrawl |
+| **Overlap@5 (vs Ideal)** | **1.000** | 0.367 | 🏆 Firecrawl |
+| **KB Outperforms FC** | — | — | 43.3% of TCs |
 
-**Kendall's τ** measures rank correlation with the ideal ordering (1.0 = perfect, 0 = random, -1.0 = perfectly reversed). Firecrawl achieves 0.453 — meaning it roughly preserves the ideal rank structure about half the time. Our internal KB achieves **-0.367** — worse than random.
+Firecrawl's native ranking significantly outperforms the internal KB on ordering quality. This is the same finding as the previous run. The KB is useful for scrape-cost avoidance but should not be used as a re-ranking signal.
 
-**Overlap@3** measures how many of the top-3 Firecrawl results also appear in the ideal top-3. Firecrawl delivers the right documents 71% of the time; the KB only 32%.
-
-### Why is the Internal KB Worse?
-
-This is not a flaw — it's an expected and instructive finding for a KB built over only 30 rounds:
-
-1. **Coverage gap:** The KB only contains content that Firecrawl already found and we chose to index. If Firecrawl missed an authoritative source, the KB certainly doesn't have it either. The KB's recall can never exceed Firecrawl's recall.
-
-2. **RRF ranking limitations:** Our RRF score fuses dense and sparse similarity to the query. This is excellent for semantic relevance but doesn't incorporate the domain authority, freshness, or PageRank signals that Firecrawl's native ranking uses. So for factual queries where authority matters (`.gov`, `.edu`), the KB tends to rank semantically-fluent but low-authority content higher.
-
-3. **Chunk fragmentation:** A page indexed as 5 × 2000-char chunks means the "full document" authority signal is spread across 5 points in Qdrant. A query might find chunks 2–4 as most relevant, which have a different score distribution than the full page.
-
-**Implication:** The internal KB is useful for **cache efficiency** (avoiding re-scrapes) but should **not** be used as a re-ranking signal to override Firecrawl's native search order. The Firecrawl ordering is consistently closer to ideal.
+**KB outperforms Firecrawl on 43.3% of TCs** — a meaningful minority. These are cases where the query semantics align strongly with the KB's RRF scoring while Firecrawl's ranking has a social media or generic hub artifact. Worth investigating whether authority-boosted re-ranking using the KB as a feature (not the ranking itself) could help.
 
 ---
 
 ## Root Cause Analysis
 
-The Improvement Agent synthesized the following 5 root causes (ranked by severity × frequency):
+The Improvement Agent synthesized 5 root causes (ranked by severity × frequency):
 
-### RC-001 · JavaScript-Rendered Data Tables Not Captured
-- **Dimension:** Scrape
+### RC-001 · Scrape Score Inversion — Complete Documents Penalized, Truncated Posts Rewarded
+- **Dimension:** `_baseline_fidelity`
 - **Severity:** High | **Confidence:** High
-- **Frequency:** 15 / 30 TCs (50%)
-- **Affected TCs:** `tc_f0d17d75`, `tc_de5e4df4`, `tc_bd1bd260`, `tc_91464a3b`, `tc_688a509c`, `tc_121ff7e0`, `tc_4d66dfdf`, `tc_7b0cb65b`, `tc_5ac84dfe`, `tc_107f793b`, `tc_89639350`, `tc_11afc8cd`, `tc_9222e13d`, `tc_8abf90d2`, `tc_02b1edeb`
+- **Frequency:** 10/30 TCs (33%)
+- **Affected TCs:** `tc_3b095b54`, `tc_316e5e79`, `tc_531d905d`, `tc_a7f33ea8`, `tc_e4e371ec`, `tc_9695f75c`, `tc_d6ace918`, `tc_b7028fb4`, `tc_0aff21d2`, `tc_a345a697`
 
-**Why it happens:** Firecrawl's default scraper captures the HTML at initial page load. Finance portals (Yahoo Finance), university dashboards, government agency sites, and ranking directories all render their key data tables via JavaScript after the initial HTML payload. The scraper sees `<div class="table-container">` but no rows.
+**Root mechanism:** The P1 agent applies scrape penalty logic that weights cosmetic issues (missing alt-text, affiliate disclosures, embedded media placeholders, minor nav link noise) as high-severity failures, while the `content_completeness` field — which directly reflects whether the document is complete or truncated — is underweighted. The result:
+
+- A 3,000-word Wikipedia article with two stray navigation links receives `scrape_score=0.20` (L1)
+- A 25-word Instagram truncation with zero content gets `scrape_score=0.79` (L4)
+
+This is not a system logic error — the P1 prompt instructs "assess how faithfully this markdown preserves the original page." The problem is the LLM's calibration: it penalizes "imperfect" formatting on complete pages more heavily than it penalizes the far more severe problem of a page with only 1% of its content visible.
 
 ---
 
-### RC-002 · Content Truncation on Long Pages
-- **Dimension:** Scrape
+### RC-002 · Thin Social Media / Forum Content Systematically Outranks Authoritative Sources
+- **Dimension:** `_baseline_ranking`
 - **Severity:** High | **Confidence:** High
-- **Frequency:** 12 / 30 TCs (40%)
-- **Affected TCs:** `tc_7b0cb65b`, `tc_5ac84dfe`, `tc_107f793b`, `tc_688a509c`, `tc_4d66dfdf`, `tc_921d35c4`, `tc_08a1ff59`, `tc_89639350`, `tc_eb136550`, `tc_bd1bd260`, `tc_9222e13d`, `tc_121ff7e0`
+- **Frequency:** 13/30 TCs (43%)
+- **Affected TCs:** `tc_3b095b54`, `tc_c6c18688`, `tc_9695f75c`, `tc_39808d09`, `tc_5cad7b97`, `tc_0aff21d2`, `tc_a024035f`, `tc_b7028fb4`, `tc_69806b76`, `tc_0c0014af`, `tc_fee03e5a`, `tc_548fb6e6`, `tc_f748b907`
 
-**Why it happens:** The markdown conversion has an implicit or explicit character limit. CDC immunization tables (20+ vaccines × 5 columns), regulatory compliance charts, and multi-section financial reports exceed this limit. The resulting markdown ends mid-sentence — often losing the last 30–50% of the document's structured content.
+**Root mechanism:** Firecrawl's ranking appears to weight keyword density and engagement/backlink signals. Social media domains (Facebook, Reddit, Instagram) produce URLs with high link velocity (many pages link to them) and exact keyword matches in post titles. For queries like "best time to visit Iceland," a Reddit post titled exactly that outranks a Nordic Visitor specialist guide by keyword match alone.
 
----
-
-### RC-003 · Search Index Misses Official/Authoritative Domains for Named Entities
-- **Dimension:** Coverage
-- **Severity:** High | **Confidence:** Medium
-- **Frequency:** 6 / 30 TCs (20%)
-- **Affected TCs:** `tc_6b53cb03`, `tc_bd1bd260`, `tc_02b1edeb`, `tc_dd4f5459`, `tc_eb136550`, `tc_8abf90d2`
-
-**Why it happens:** When a query names 3+ specific entities ("JR East vs JR West vs JR Kyushu", "NASA GISS vs NOAA vs Berkeley Earth"), Firecrawl's search tends to return pages that discuss the *topic* but miss the specific official sub-entity. The official regional JR Pass sites, the NASA GISS data portal, and the INPE PRODES dashboard are authoritative but may not rank highly by keyword or PageRank signals for comparison queries.
+The problem is structural: Firecrawl's search is designed for general web search, not authority-weighted retrieval for agentic AI use cases.
 
 ---
 
-### RC-004 · Ranking Undervalues Authority for Data-Extraction Queries
-- **Dimension:** Ranking
+### RC-003 · Multi-Hop Queries Fail Coverage on All Sub-Hops Beyond the First
+- **Dimension:** `coverage`, `multi_hop_synthesis`, `data_completeness`
 - **Severity:** High | **Confidence:** High
-- **Frequency:** 11 / 30 TCs (37%)
-- **Affected TCs:** `tc_688a509c`, `tc_74ceb664`, `tc_bd1bd260`, `tc_91464a3b`, `tc_dd4f5459`, `tc_121ff7e0`, `tc_8abf90d2`, `tc_de5e4df4`, `tc_f7ea9535`, `tc_02b1edeb`, `tc_aadb30d9`
+- **Frequency:** 4/30 TCs (13%)
+- **Affected TCs:** `tc_0c0014af`, `tc_ec3ed7e2`, `tc_35529ad7`, `tc_3b4eb676`
 
-**Why it happens:** For queries with `intent=data_extraction` or `structured_data_extraction` category, the ideal ranker should prioritize:
-1. The named entity's own official domain (`.gov`, `.edu`, official corporate site)
-2. Dedicated comparison/analytics platforms (SeatGuru, Cruise Critic, tc39.es)
-3. Reputable analysis sites
+**Root mechanism:** Queries requiring 2–3 reasoning hops ("Identify entity X → find X's attribute Y → extract specific values from Y") are issued as single queries. Firecrawl returns documents satisfying Hop 1 (identifying the entity) but no document satisfies Hops 2–3.
 
-But Firecrawl currently ranks by general relevance + engagement, which surfaces social media (Instagram posts about Goldman Sachs picks), Reddit threads (Rust benchmarks), and news aggregators (Yahoo Finance for financial data) above official sources.
+Example — `tc_ec3ed7e2` ("Largest sovereign wealth fund AUM and its top holdings with allocation percentages"):
+- **Hop 1** (which is the largest fund?): ✅ All 5 documents identify Norway's GPFG
+- **Hop 2** (what are its top holdings?): ❌ Zero documents contain holdings data
+- **Hop 3** (what are the % allocations?): ❌ Zero documents contain allocation percentages
+
+The document that answers Hops 2–3 (nbim.no holdings report) was never retrieved.
 
 ---
 
-### RC-005 · Paywalls, Login Walls, and Server Errors Block Critical Content
-- **Dimension:** Scrape
+### RC-004 · Error Pages, CAPTCHA Challenges, and Empty Scrapes Pollute Rankings
+- **Dimension:** `_baseline_ranking`, `_baseline_fidelity`
+- **Severity:** Medium | **Confidence:** High
+- **Frequency:** 5/30 TCs (17%)
+- **Affected TCs:** `tc_21e3b4aa`, `tc_316e5e79`, `tc_fee03e5a`, `tc_39808d09`, `tc_5cad7b97`
+
+**Root mechanism:** When Firecrawl returns a URL that responds with a CAPTCHA wall (ScienceDirect), a 5xx error page (OSTI), a Cloudflare challenge, or a Quora "Something went wrong" page, the scrape still produces a result with `content_completeness='error_page'` and `word_count < 50`. These results are not filtered from the ranking and continue to occupy positions 1–5 with `authority=0.0` and `relevance=0.0`.
+
+Example — `tc_21e3b4aa` (DAC energy penalty):
+- Rank 3: OSTI error page — `authority=0.0`, `relevance=0.0`, `word_count=42`, `content_completeness='error_page'`
+- This error page outranks the NETL DOE technical report at Rank 5 (`authority=0.98`, `relevance=0.92`)
+
+---
+
+### RC-005 · Comparative Research Intent Eroded by Over-Decomposition
+- **Dimension:** `comparative_context_recovery`, `_baseline_ranking`
 - **Severity:** Medium | **Confidence:** Medium
-- **Frequency:** 4 / 30 TCs (13%)
-- **Affected TCs:** `tc_aadb30d9`, `tc_6b53cb03`, `tc_91464a3b`, `tc_f0d17d75` (partial)
+- **Frequency:** 3/30 TCs (10%)
+- **Affected TCs:** `tc_548fb6e6`, `tc_f748b907`, `tc_0c0014af`
 
-**Why it happens:** Legal, regulatory, and financial content is behind commercial paywalls (Bloomberg Law, Practical Law, PatentlyO), government login walls (USPTO portal), or bot-detection systems (Cloudflare on BIPC.com). These are genuine access barriers that cannot be solved purely at the scraping layer without session authentication.
+**Root mechanism:** Queries with the `over_decomposed` chaos archetype are narrow entity-focused queries that lost their comparative cross-entity context. The retrieval pipeline returns single-entity pages for each named entity but never finds a page that compares them side-by-side. The `comparative_context_recovery` dimension specifically tests for this and scores L1–L2 when no comparative document is found.
 
 ---
 
 ## Per-TC Failure Catalog
 
-The following 25 test cases scored below the 0.80 pass threshold. Arranged by descending severity (lowest score first):
-
-![Frontend Test Cases tab showing searchable data table and score badges](./screenshots/frontend_testcases_table.png)
+![Test Cases table with per-dimension scores](./screenshots_new/testcases_table.png)
 
 ### 🔴 Critical Failures (Score < 0.60)
 
 | TC ID | Score | Query | Primary Failure |
 |-------|-------|-------|----------------|
-| `tc_aadb30d9` | 0.65 | USPTO patent term adjustment rules 2026 PTAB trials | All top pages blocked (login walls, paywalls, Cloudflare) |
-| `tc_6b53cb03` | 0.44 | Japan Rail Pass July 2026 price comparison JR East vs JR West vs JR Kyushu | Entire search missed all regional JR official sites |
-| `tc_dd4f5459` | 0.55 | ECMAScript 2025 vs 2026 finalized features stage 4 proposal list | tc39.es and MDN never returned; only blogs and Reddit |
-| `tc_02b1edeb` | 0.55 | Compare inside balcony cabin sizes 2026 Royal Caribbean Carnival Norwegian | NCL entirely missing from all results; social media ranked #1 |
+| `tc_0c0014af` | 0.39 | Top fossil fuel producers vulnerable to climate change + net zero targets | Multi-hop gap: only Hop 1 covered, Hops 2–3 zero coverage; Facebook at Rank 4 above State Dept |
+| `tc_ec3ed7e2` | 0.57 | Largest sovereign wealth fund AUM 2026 + top holdings + allocation % | 3-hop failure: NBIM identified but holdings data absent from all 5 results |
+| `tc_3b4eb676` | 0.53 | Quantitative energy penalty for amine sorbent regeneration in DAC | Zero documents contain amine-specific DAC regeneration energy values; ScienceDirect truncated at 511 words |
+| `tc_9695f75c` | 0.57 | How to write an effective academic literature review step by step | Reddit (auth=0.1, 22w) at Rank 2 above Purdue OWL (auth=0.95) at Rank 4; YouTube scrape_score=0.20 despite full transcript |
+| `tc_39808d09` | 0.47 | How to build a diversified dividend growth portfolio for retirement income | Reddit empty scrape at Rank 2 (word_count=0, scrape_score=0.0); Bogleheads buried at Rank 3 |
+| `tc_35529ad7` | 0.56 | Largest sovereign wealth fund AUM 2026 + top holdings (exact_duplicate) | Exact same coverage failure as tc_ec3ed7e2 — confirms cache system, not sampling artifact |
 
 ---
 
 ### 🟡 Marginal Failures (Score 0.60–0.79)
 
-| TC ID | Score | Query | Primary Failure Dimension | Key Issue |
-|-------|-------|-------|--------------------------|-----------|
-| `tc_f0d17d75` | 0.76 | Goldman Sachs top stock picks July 2026 with tickers and price targets | Scrape | JS tables missing on Yahoo Finance; Goldman page is generic hub |
-| `tc_89639350` | 0.79 | Apple Q2 2026 revenue breakdown iPhone services vs Wall Street | Scrape | Only bullet lists, no tables; CNBC truncated; Apple links to PDF |
-| `tc_15278c17` | 0.77 | Python 3.13 typing syntax updates compared to 3.12 ParamSpec TypeVarTuple | Ranking + Scrape | Personal blog demoted vs Reddit; no version comparison table |
-| `tc_688a509c` | 0.74 | 2026 state privacy law comparison CCPA vs CPA vs VCDPA | Scrape | khlaw.com table truncated; Bloomberg missing; Practical Law paywalled |
-| `tc_91464a3b` | 0.66 | UC Berkeley UCLA San Diego 2026 freshman admit rates by major | Scrape + Ranking | JS dashboard inaccessible; Facebook ranked #2; SFChronicle returned 406 |
-| `tc_74ceb664` | 0.64 | What stocks does Goldman Sachs say to buy in July 2026 | Ranking | Official GS insights page ranked below Yahoo Finance; Instagram in results |
-| `tc_04205a98` | 0.77 | How many grams of sugar per day according to new FDA guidelines 2026 | Coverage + Ranking | FDA Facebook post not recognized as authoritative; no sex-specific table |
-| `tc_4d66dfdf` | 0.79 | CDC adult immunization schedule 2026 table vaccine names doses | Scrape | CDC table truncated mid-row, missing Influenza and 7 other vaccines |
-| `tc_921d35c4` | 0.76 | EU Digital Services Act 2026 deadline for VLOPs risk assessments | Scrape | All results truncated; no compliance deadlines table; cookie banner noise |
-| `tc_08a1ff59` | 0.78 | Federal Reserve dot plot June 2026 FOMC interest rate projections | Scrape | PDF parsing loses table structure; numeric data fragmented |
-| `tc_bd1bd260` | 0.65 | Global average temperature anomaly 2026 YTD NOAA NASA GISS Berkeley Earth | Coverage + Scrape | NASA GISS never returned; NOAA table missing; data truncated |
-| `tc_7b0cb65b` | 0.65 | What vaccines do adults need in 2026 according to CDC and how many doses | Scrape | Severe truncation on CDC schedule; child schedule ranked above adult |
-| `tc_121ff7e0` | 0.78 | ENSO status July 2026 NOAA CPC sea surface temperature anomalies | Ranking + Scrape | Critical tables are images; CPC advisory ranked below CPC PDF |
-| `tc_11afc8cd` | 0.75 | Singapore Airlines A380 vs Emirates A380 vs Qatar A350 economy seat size | Coverage + Ranking | No comparison chart retrieved; SeatGuru not surfaced |
-| `tc_8abf90d2` | 0.73 | 2026 Human Development Index country rankings life expectancy education GNI | Ranking + Scrape | Wikipedia ranked over UNDP official; table truncated |
-| `tc_5ac84dfe` | 0.78 | List of recommended vaccines for adults in 2026 from CDC with doses | Ranking + Scrape | Notes page ranked first (supplementary); easy-read page ranked 4th; truncated |
-| `tc_eb136550` | 0.76 | Amazon deforestation rate 2026 INPE PRODES vs GLAD University of Maryland | Coverage | PRODES sub-program never mentioned in any result |
-| `tc_107f793b` | 0.74 | What are the recommended adult vaccines for 2026 and how many doses | Ranking | Notes page ranked first; child schedule not demoted; scrape quality used poorly |
-| `tc_de5e4df4` | 0.70 | QS World University Rankings 2026 engineering top 50 list | Scrape | Lazy-loaded tables not rendered; truncation; filter UI noise |
-| `tc_f7ea9535` | 0.74 | Rust async runtime tokio vs monoio vs smol performance benchmark 2026 | Ranking + Scrape | Reddit ranked #1 over benchmark article; tables missing from dedicated article |
-| `tc_9222e13d` | 0.73 | California Advanced Clean Fleets regulation 2026 compliance deadlines | Scrape | Missing data tables in all results; cookie banner noise; content truncated |
+| TC ID | Score | Query Excerpt | Primary Failure Dimension | Key Issue |
+|-------|-------|---------------|--------------------------|-----------|
+| `tc_3b095b54` | 0.76 | Lisbon neighborhoods Alfama tram 28 guide | Fidelity (inversion) + Ranking | Instagram at Rank 1 (25w); complete blogs at 0.20 scrape score |
+| `tc_c6c18688` | 0.59 | Lisbon Alfama Bairro Alto cultural heritage origins | Fidelity + Ranking + Coverage | Facebook at Rank 1 (23w); Bairro Alto history entirely absent |
+| `tc_9a8d344d` | 0.73 | Best season to trek in Patagonia | Ranking + Fidelity | Reddit (29w) at Rank 2 above Swoop (specialist guide) |
+| `tc_21e3b4aa` | 0.67 | Energy penalty analysis for sorbent regeneration in direct air capture | Ranking + Fidelity | OSTI error page at Rank 3; NETL DOE report buried at Rank 5 |
+| `tc_5cad7b97` | 0.62 | Best time to visit Iceland for Northern Lights | Ranking + Fidelity | Reddit (17w, auth=0.2) at Rank 1; Rank 5 empty doc (scrape_score=0.0) |
+| `tc_69806b76` | 0.65 | Latest archaeological discoveries transforming understanding of ancient Egypt | Ranking + Fidelity | 2023 travel blog at Rank 1; penn.museum (auth=1.0) buried at Rank 5 |
+| `tc_0aff21d2` | 0.74 | Byzantine Empire fall Constantinople 1453 Ottoman conquest | Fidelity + Authority | Facebook (25w), Reddit (28w), Quora error dominate result set |
+| `tc_a024035f` | 0.59 | Binding agents and starches for gluten-free whole grain bread | Coverage + Ranking | No whole-grain-specific starch content; Facebook (19w) at Rank 3 |
+| `tc_b7028fb4` | 0.74 | Concert tour production crew staging sound engineering | Ranking + Fidelity | Instagram (23w) at Rank 1; complete YouTube/Quora scores inverted to 0.20 |
+| `tc_fee03e5a` | ~0.65 | Lisbon travel + cache variant | Ranking | Thin social media in top results |
+| `tc_548fb6e6` | ~0.62 | Comparative query (over_decomposed) | comparative_context_recovery | Single-entity results only |
+| `tc_f748b907` | ~0.64 | Comparative research (over_decomposed) | comparative_context_recovery + ranking | No cross-entity comparison found |
 
 ---
 
-### ✅ Passing Test Cases (Score ≥ 0.80)
+### 🟠 Failing Due to Fidelity Bug Only (Score ≥ 0.80 but floor blocked)
 
-These 5 TCs cleared the 0.80 threshold:
+These TCs have solid retrieval and content scores but fail the dimension floor gate due to the scrape_score inversion on `_baseline_fidelity`:
 
-| TC ID | Score | Query (inferred from domain context) | Why it passed |
-|-------|-------|--------------------------------------|---------------|
-| TCs with score ≥ 0.80 | 0.80–0.88 | Queries where top results were standard HTML pages with text content | No JS rendering needed; content in top half of page; no paywalls; plain prose or simple lists |
+| TC ID | Score | Query | Fidelity Score | Notes |
+|-------|-------|-------|----------------|-------|
+| `tc_a211b3c3` | 0.96 | Latest research on psychedelic-assisted therapy | 0.34 (L2) | All 5 docs score 0.20–0.60 despite complete content |
+| `tc_531d905d` | 0.90 | 2026 Formula 1 season calendar and driver lineup | 0.31 (L2) | Wikipedia at 0.20 despite full faithful reproduction; Instagram 0.79 |
+| `tc_d6ace918` | 0.87 | Long COVID neurological symptoms and mechanisms | 0.31 (L2) | PMC article complete at 0.20; Facebook NIH post truncated at 0.60 |
+| `tc_e4e371ec` | 0.93 | Health risks of exceeding added sugar intake | 0.23 (L2) | healthdirect.gov.au: empty issues list, score=0.20; second fidelity eval contradicts first (0.9 vs 0.228) |
+| `tc_a7f33ea8` | 0.86 | Current recommended daily added sugar limit for adults | ~0.25 (L2) | Harvard/CDC at 0.20 (faithfully captures); Facebook FDA post at 0.79 |
 
-**The pattern of success:** Passing TCs are those where:
-1. The authoritative source uses standard HTML (not JS-rendered tables)
-2. The answer appears within the first ~8000 chars of the page
-3. No paywall or Cloudflare protection
-4. The "must_mention" entities appear prominently in the snippet (not deep in a table)
+---
+
+### ✅ No Clear-Cut Passes (Highest Scoring TCs)
+
+| TC ID | Score | Query Excerpt | Why Near-Pass |
+|-------|-------|---------------|---------------|
+| `tc_a211b3c3` | 0.96 | Psychedelic-assisted therapy research | Coverage L5, Ranking L5 — only fidelity floor blocks pass |
+| `tc_e4e371ec` | 0.93 | Added sugar health risks | All dimensions strong — dual fidelity evaluation contradiction is the sole blocker |
+| `tc_531d905d` | 0.90 | F1 2026 season | Full coverage, good ranking — scrape inversion the sole cause |
 
 ---
 
 ## Cross-Dimension Failure Patterns
 
-These are failures that compound across multiple dimensions simultaneously:
+![Expanded TC detail — P1 profiles + rubric breakdown + diagnosis](./screenshots_new/testcase_expanded.png)
 
-### Pattern 1: Missing Authoritative Domain Cascades
-
-```
-Search misses official domain
-       │
-       ├──► Coverage FAILS (entity not found in any result)
-       │
-       └──► Ranking FAILS (non-authoritative alternative ranks first)
-                   │
-                   └──► Scrape FAILS (non-authoritative pages use dynamic tables
-                                      or have thin, blog-style content)
-```
-
-**Example:** `tc_6b53cb03` — "Japan Rail Pass July 2026 comparison"
-- JR East/West/Kyushu official sites never returned → Coverage 0.0
-- Travel aggregator sites rank first → Ranking poor
-- Aggregator sites have JS-based price tables and cookie banners → Scrape 0.2–0.4
-
-### Pattern 2: Dynamic Content → Dual Dimension Failure
+### Pattern 1: Scrape Score Inversion → Fidelity Floor → TC Fail
 
 ```
-JavaScript-rendered page
-       │
-       ├──► Scrape FAILS (tables not captured → sparse, thin markdown)
-       │
-       └──► Ranking DEGRADED (because poor-quality scraped content may feed
-                               back into future KB searches, ranking data-poor
-                               pages higher than they deserve)
+P1 agent: cosmetic penalty overweighted on complete docs
+        │
+        └──► scrape_score INVERTED (complete=0.20, truncated=0.79)
+                    │
+                    └──► _baseline_fidelity aggregated avg < 0.40
+                                │
+                                └──► Floor gate TRIGGERED → TC FAILS
+                                     regardless of all other dimension scores
 ```
 
-**Example:** `tc_de5e4df4` — "QS Rankings 2026 engineering top 50"
-- Ranking tables are lazy-loaded → empty markdown → Scrape 0.3
-- When this content is indexed into the KB, the "QS Rankings" chunks are content-poor → future KB queries for ranking data will hit thin chunks
+**Example:** `tc_531d905d` (F1 2026 season)
+- `source_authority` = L5, `topical_coverage` = L5, `_baseline_ranking` = L4
+- `_baseline_fidelity` = 0.31 due to inverted scrape scores → TC blocked at 0.90
 
-### Pattern 3: Paywall → Forced Fallback Cascade
+---
+
+### Pattern 2: Social Media Ranking Pollution → Triple Dimension Failure
 
 ```
-Top 2 results behind paywall/login
-       │
-       └──► System forced to rely on results #3-#5
-                   │
-                   ├──► Ranking effectively inverted (result #3-#5 were
-                   │    ranked lower because they're less authoritative)
-                   │
-                   └──► Scrape quality compromised (fallback pages are
-                        secondary analysis, not primary structured data)
+Social media domain ranks #1–2 (word_count < 50)
+        │
+        ├──► _baseline_fidelity FAILS (thin content = low aggregated scrape avg)
+        │
+        ├──► _baseline_ranking FAILS (most relevant source buried)
+        │
+        └──► source_authority FAILS (result portfolio dominated by 0.1-0.2 auth sources)
 ```
+
+**Observed in:** `tc_c6c18688`, `tc_0aff21d2`, `tc_5cad7b97`, `tc_39808d09`
+
+---
+
+### Pattern 3: Multi-Hop Query → Coverage + Synthesis + Data Completeness Triple Fail
+
+```
+Single query issued for 3-hop comparative data
+        │
+        └──► Firecrawl retrieves Hop 1 documents only
+                    │
+                    ├──► coverage FAILS (Hops 2–3 missing entities)
+                    │
+                    ├──► multi_hop_synthesis FAILS (no cross-hop synthesis possible)
+                    │
+                    └──► data_completeness FAILS (specific values absent)
+```
+
+**Observed in:** `tc_0c0014af`, `tc_ec3ed7e2`, `tc_35529ad7`, `tc_3b4eb676`
+
+---
+
+### Pattern 4: Paywalled Academic Content → Fidelity + Ranking Cascade
+
+```
+Top-2 results behind paywall → navigation-only scrape
+        │
+        ├──► _baseline_fidelity FAILS (nav_link_ratio > 0.7, word_count < 100)
+        │
+        └──► _baseline_ranking DEGRADED (empty pages rank above accessible sources
+             because domain authority is high)
+```
+
+**Observed in:** `tc_316e5e79` (ScienceDirect captcha at Rank 1), `tc_21e3b4aa` (OSTI 500 error at Rank 3)
 
 ---
 
 ## RL Signal Statistics
 
-| Signal Type | Count | Description |
+![DPO Pairs — Chosen vs Rejected URL comparison](./screenshots_new/rl_dpo_pairs.png)
+
+| Signal Type | Count | Output File |
 |-------------|-------|-------------|
-| **DPO Pairs** | 11 | Generated when judge's ideal top result ≠ Firecrawl's actual top result |
-| **Reward Signals** | 112 | One per URL × TC combination where scrape quality was evaluated |
-| **Failure Patterns (taxonomy)** | 8 | Grouped by (category, intent) combinations with avg_score < 0.80 |
+| **DPO Pairs** | 23 | `dpo_pairs.jsonl` |
+| **Reward Signals** | 150 | `rewards.jsonl` |
+| **Listwise Rankings** | 30 | `listwise_rankings.jsonl` |
+| **Contrastive Fail Pairs** | 67 | `contrastive_fail_pairs.jsonl` |
+| **Query Reformulations** | 30 | `query_reformulations.jsonl` |
+| **SFT Gold Examples** | 0 | `sft_gold.jsonl` |
+| **Scrape Quality Labels** | 150 | `scrape_quality_labels.jsonl` |
 
-![Frontend RL Signals tab showing DPO training pairs and taxonomy](./screenshots/frontend_rl_signals_dpo.png)
+**Total signals generated: 500 across 7 signal types**
 
-### DPO Pair Quality
+This is a **significant increase** from the previous run (3 signal types, ~131 total signals).
 
-The 11 DPO pairs all arise from the **Ranking** dimension's disagreements. Each pair encodes:
-- **Chosen:** The result the judge says *should* be ranked first (typically the official/authoritative page)
-- **Rejected:** The result Firecrawl *actually* ranked first (typically a news aggregator, social media post, or general hub page)
-- **Rationale:** The judge's explanation for why the chosen source is superior
+### Notable Signal Observations
 
-**Dominant rationale themes:**
-- "Official domain should rank above aggregator for data queries" (5 pairs)
-- "Named entity's own page should rank above news articles about that entity" (4 pairs)
-- "Dedicated benchmark/comparison source should rank above forum discussion" (2 pairs)
+**DPO Pairs (23):** All 23 pairs encode a ranking preference. Dominant rationale: "Low-authority social media result (word_count < 50) should be rejected in favor of specialist source (authority > 0.5, relevance > 0.9)." These pairs are high-quality training signal for a ranking re-ranker.
 
-### Reward Signal Breakdown
+**Contrastive Fail Pairs (67):** Largest signal class. Each pair captures a specific rubric dimension failure — the "bad state" (actual retrieval outcome) vs. the "good state" (what the rubric says should have been there). 67 pairs across 30 TCs means an average of 2.2 contrastive fail triggers per TC, confirming that the rubric floor is regularly triggered.
 
-The 112 reward signals cover the full URL × TC matrix. Composite reward formula:
-```
-reward = 0.35 × relevance + 0.30 × markdown_quality + 0.20 × completeness + 0.15 × freshness
-```
+**SFT Gold (0):** Zero TCs scored above the `sft_gold_score_threshold` (0.85) without triggering a floor failure. This is expected given the 0% pass rate. Once the fidelity inversion is fixed, ~5 TCs (those scoring 0.87–0.96 overall) would qualify as gold examples.
 
-**Estimated distribution:**
-- ~30 signals with reward > 0.80 (clean HTML pages, strong markdown, full content)
-- ~55 signals with reward 0.50–0.79 (partial truncation or some noise)
-- ~27 signals with reward < 0.50 (JS tables missing, paywall, heavy truncation)
+**Query Reformulations (30):** One per TC. These are the Improvement Agent's suggested query rewrites for each failing TC. Archetype coverage: multi_hop queries get decomposed sub-queries; over_decomposed queries get expanded versions with restored comparative context; temporal queries get year-anchored variants.
 
-### Failure Taxonomy (Top 5 Patterns)
+![RL Taxonomy — Failure pattern cluster view](./screenshots_new/rl_taxonomy.png)
 
-| Pattern | Category | Intent | Avg Score | Primary Issue |
-|---------|----------|--------|-----------|--------------|
-| `structured_data_extraction_data_extraction_missing_element` | structured_data_extraction | data_extraction | ~0.62 | Missing structured elements |
-| `structured_data_extraction_factual_lookup_missing_element` | structured_data_extraction | factual_lookup | ~0.71 | Tables not captured |
-| `rapidly_changing_novel_missing_element` | rapidly_changing | exploratory | ~0.68 | Dynamic data not rendered |
-| `paywalled_content_factual_lookup_paywall_block` | paywalled_content | factual_lookup | ~0.67 | Access denied |
-| `pdf_document_factual_lookup_table_parsing_error` | pdf_document | factual_lookup | ~0.74 | PDF table structure lost |
+### Improvement Micro-Taxonomy (Top Patterns)
+
+| Pattern | Frequency | Description |
+|---------|-----------|-------------|
+| `scrape_score_inversion` | 33% | Complete documents with `content_completeness='complete'` and `word_count > 500` receive `scrape_score=0.20` while truncated fragments with `word_count < 50` receive `0.60–0.79`. Single largest contributor to `_baseline_fidelity` failures. |
+| `thin_social_media_ranking` | 43% | Social media posts (Reddit, Facebook, Instagram) with `word_count < 50`, `authority < 0.3`, and failed scrapes systematically occupy top-3 ranking positions above comprehensive authoritative sources. |
+| `multi_hop_decomposition_failure` | 13% | 3-hop queries treated as single-hop lookups. Only the first hop's documents are retrieved. |
+| `error_page_rank_poisoning` | 17% | Error pages (OSTI 500, ScienceDirect captcha, Quora error) not filtered from results and occupy ranking positions above legitimate content. |
+| `intent_erosion_over_decomposition` | 10% | Comparative queries decomposed into single-entity tokens, losing cross-entity comparison intent. |
+| `paywalled_academic_content_pollution` | 10% | Academic publisher pages (ScienceDirect, ACS) behind paywalls return navigation-only content that still occupies high ranking positions. |
+
+![Reward Signals — Per-URL reward bars](./screenshots_new/rl_rewards.png)
 
 ---
 
@@ -565,167 +605,188 @@ reward = 0.35 × relevance + 0.30 × markdown_quality + 0.20 × completeness + 0
 
 ### Engineering Proposals
 
-Ranked by `priority_score` (impact × frequency / effort):
+Ranked by `priority_score` from the Improvement Agent:
 
-#### 🥇 Priority 9.0 — Site-Specific Search for Named Entities
+#### 🥇 Priority 9.0 — Fix scrape_score Calibration for content_completeness
 
-> **Proposal:** For queries containing explicit organization names (Goldman Sachs, JR East, NASA GISS, INPE PRODES), automatically execute a parallel `site:domain` search alongside the main query and merge results.
+> **Proposal:** Replace the hardcoded scrape_score floor with a content-based scoring function that treats `content_completeness` as the dominant factor.
 
-- **Targets:** RC-003 (missing official domains)
-- **Expected Impact:** +0.08 on coverage dimension
-- **Effort:** Low (query expansion before search call, no infrastructure changes)
-- **Affected TCs:** `tc_6b53cb03`, `tc_bd1bd260`, `tc_02b1edeb`, `tc_dd4f5459`, `tc_eb136550`
+**Specific fix:**
 
-**Implementation sketch:**
 ```python
-# In firecrawl_client.py search()
-entity_names = extract_named_entities(query)
-entity_domains = resolve_to_domains(entity_names)  # e.g., "NASA GISS" → "giss.nasa.gov"
-parallel_search = [f"site:{d} {query}" for d in entity_domains[:2]]
-all_results = merge_and_deduplicate(main_results, *parallel_search_results)
+# In P1 agent post-processing (_validate_p1_consistency or calibration layer)
+def calibrate_scrape_score(p1_result: P1Result) -> P1Result:
+    cc = p1_result.content_completeness
+    wc = p1_result.word_count
+    issues = p1_result.scrape_issues
+
+    # Rule 1: complete documents cannot score below 0.70 regardless of cosmetic issues
+    if cc == "complete" and wc > 500:
+        p1_result.scrape_score = max(p1_result.scrape_score, 0.70)
+
+    # Rule 2: truncated documents cannot score above 0.40
+    if cc == "appears_truncated" and wc < 100:
+        p1_result.scrape_score = min(p1_result.scrape_score, 0.40)
+
+    # Rule 3: error pages and navigation-only pages are capped at 0.20
+    if cc in ("error_page", "navigation_only"):
+        p1_result.scrape_score = min(p1_result.scrape_score, 0.20)
+
+    return p1_result
 ```
 
----
-
-#### 🥈 Priority 8.0 — Increase Scrape Length + Multi-Pass Chunked Extraction
-
-> **Proposal:** Double the maximum scrape character limit (currently appears to be ~8000 chars effective). For pages where the first pass is truncated, implement a "second pass" requesting a paginated continuation or using a different content selector.
-
-- **Targets:** RC-002 (content truncation)
-- **Expected Impact:** +0.10 on overall score
-- **Effort:** Medium (requires Firecrawl config changes + pagination logic)
-- **Affected TCs:** 12 TCs across CDC, legal, financial domains
+- **Targets:** RC-001 (scrape score inversion)
+- **Expected Impact:** +0.25 on `_baseline_fidelity` (from 0.397 → ~0.65), +0.08 overall
+- **Affected TCs:** ~10 TCs (immediate fix), estimated 10–15 TCs would pass after this fix alone
 
 ---
 
-#### 🥉 Priority 7.0 — Headless Browser Rendering with Wait Mechanisms
+#### 🥈 Priority 4.5 — Authority + Content Density Ranking Gate
 
-> **Proposal:** For URLs matching known dynamic-data domains (Yahoo Finance, topuniversities.com, QS rankings, UC dashboard), trigger full headless browser rendering with a 5–10 second `waitForSelector` on `table tr` elements before extracting markdown.
+> **Proposal:** Add post-retrieval re-ranking step that penalizes low-authority, thin-content results from social media domains.
 
-- **Targets:** RC-001 (JavaScript tables)
-- **Expected Impact:** +0.15 on scrape dimension
-- **Effort:** High (requires JS rendering infrastructure)
-- **Affected TCs:** 15 TCs — highest frequency root cause
+```python
+SOCIAL_DOMAINS = {"facebook.com", "instagram.com", "reddit.com", "youtube.com", "twitter.com", "tiktok.com", "quora.com"}
+
+def rerank_authority_density(results, intent):
+    """Demote social media / thin content for non-social queries."""
+    scored = []
+    for r in results:
+        penalty = 1.0
+        domain = extract_domain(r.url)
+        if domain in SOCIAL_DOMAINS and (r.word_count or 0) < 100:
+            penalty = 0.3  # severe demotion for thin social media
+        elif domain in SOCIAL_DOMAINS:
+            penalty = 0.7  # moderate demotion for longer social posts
+        scored.append((r, r.firecrawl_rank * penalty))
+    return [r for r, _ in sorted(scored, key=lambda x: x[1])]
+```
+
+- **Targets:** RC-002 (social media ranking), RC-004 (error page pollution)
+- **Expected Impact:** +0.15 on `_baseline_ranking` (0.481 → ~0.63), +0.06 overall
+- **Affected TCs:** 13 TCs (ranking)
 
 ---
 
-#### Priority 7.0 — Retrain Ranking with Authority + Source-Type Signals
+#### 🥉 Priority 4.0 — Error Page Detection + Backfill
 
-> **Proposal:** Add post-retrieval re-ranking using a learned authority score that distinguishes: official domains (`.gov`, `.edu`, named-entity own domain) > dedicated comparison databases (SeatGuru, Cruise Critic, tc39.es) > reputable analysis (Bloomberg non-paywall, Reuters) > forum/social media.
+> **Proposal:** Add post-scrape filter that detects error pages, CAPTCHA challenges, and empty scrapes and removes them before ranking, backfilling from the next best Firecrawl candidates.
 
-- **Targets:** RC-004 (ranking undervalues authority)
-- **Expected Impact:** +0.10 on ranking dimension
-- **Effort:** Medium (heuristic domain whitelist) to High (trained re-ranker)
+```python
+def filter_error_results(results):
+    clean = []
+    for r in results:
+        wc = len((r.full_markdown or "").split())
+        if wc < 50 and r.scrape_cache_status != "kb_semantic_hit":
+            logger.warning(f"[Filter] Removing thin/error result: {r.url} ({wc} words)")
+            continue
+        clean.append(r)
+    return clean
+```
+
+- **Targets:** RC-004 (error page rank poisoning)
+- **Expected Impact:** +0.10 on `_baseline_ranking` for affected TCs, +0.04 overall
+- **Affected TCs:** 5 TCs
 
 ---
 
-#### Priority 4.0 — Access Strategies for Blocked/Paywalled Pages
+#### Priority 2.0 — Multi-Hop Query Decomposition
 
-> **Proposal:** Implement retry logic with alternative user-agents, cached/archive fallback (Wayback Machine), and snippet-only extraction for paywalled content.
+> **Proposal:** Implement a query decomposition pre-pass that detects 2–3 hop compound queries and splits them into sub-queries, merging results to cover all hops.
 
-- **Targets:** RC-005 (paywalls and blocks)
-- **Expected Impact:** +0.03 on scrape dimension
-- **Effort:** High (authentication management, legal considerations)
-- **Affected TCs:** 4 TCs
+- **Targets:** RC-003 (multi-hop failure)
+- **Expected Impact:** +0.30 on `coverage` for multi-hop TCs, +0.20 on `multi_hop_synthesis`, +0.10 overall
+- **Effort:** High (requires LLM call for decomposition + result merging logic)
+- **Affected TCs:** 4 TCs — but this is the most structurally significant gap
+
+---
+
+#### Priority 2.0 — Competitor Entity Injection for Comparative Queries
+
+> **Proposal:** For `comparative_research` intent queries, add intent classification pre-pass that identifies named entities in the query and injects `site:entity-domain` sub-searches for each.
+
+- **Targets:** RC-005 (over-decomposed comparative queries)
+- **Expected Impact:** +0.25 on `comparative_context_recovery`, +0.15 on ranking for comparative queries
+- **Effort:** Medium
+- **Affected TCs:** 3 TCs
 
 ---
 
 ### Quick Wins
 
-These can be implemented with minimal engineering effort and provide immediate score improvement:
+![Report Tab — Rendered markdown with dimension breakdown](./screenshots_new/report_tab.png)
 
-#### Quick Win 1 — Demote Social Media for Data Queries (+0.05 on ranking)
+#### Quick Win 1 — Fix scrape_score Floor for Complete Documents (+0.25 on fidelity)
 
-Apply a heuristic post-retrieval filter: if `intent == data_extraction` or `category == structured_data_extraction`, push social media domains (Facebook, Instagram, Reddit, YouTube) to positions 4–5 unless the query explicitly names that platform.
+This is a **one-line calibration fix** in `_validate_p1_consistency()`. The highest-impact change in this entire roadmap. Add the rule: if `content_completeness='complete'` AND `word_count > 500`, enforce `scrape_score >= 0.70`.
 
-```python
-SOCIAL_DOMAINS = {"facebook.com", "instagram.com", "reddit.com", "youtube.com", "twitter.com"}
-
-def rerank_for_data_queries(results, intent, category):
-    if intent in ("data_extraction",) or "structured" in category:
-        social = [r for r in results if any(d in r.url for d in SOCIAL_DOMAINS)]
-        non_social = [r for r in results if r not in social]
-        return non_social + social  # push social to end
-    return results
-```
-
-**No infrastructure changes required.** Can be added as a post-processing step in `firecrawl_client.py`.
+**Expected result:** ~10 TCs immediately pass the floor gate. 5 TCs (those with overall score 0.87–0.96) immediately pass.
 
 ---
 
-#### Quick Win 2 — Increase Truncation Limit for Markdown Conversion (+0.03 overall)
+#### Quick Win 2 — Filter Error Pages from Result Sets (+0.05 overall)
 
-The `MAX_MARKDOWN_CHARS = 8000` in `search_ir/indexer.py` and the scrape preview sent to the judge are separate limits. If Firecrawl's API itself is truncating, this would require a parameter change in the `client.scrape()` call. If it's our internal limit, increasing `MAX_MARKDOWN_CHARS` from 8000 to 16000 immediately benefits 12 TCs.
-
-**Change in `search_ir/indexer.py`:**
-```python
-MAX_MARKDOWN_CHARS = 16000   # was 8000
-MAX_CHUNKS_PER_DOC = 8       # was 5 — adjust to match new content length
-```
+5-line post-scrape filter: if `word_count < 50` AND `content_completeness in ['error_page', 'navigation_only']`, remove the result and backfill. Eliminates OSTI error page, ScienceDirect CAPTCHA, Quora "Something went wrong" from ranking positions.
 
 ---
 
-#### Quick Win 3 — `site:` Query Expansion for Named Entity Queries (+0.04 on coverage)
+#### Quick Win 3 — Social Media word_count Penalty for Ranking (+0.10 on ranking)
 
-Before the main Firecrawl search, detect if the query contains known organization names and add a `site:domain` sub-search. This is a simplified version of Proposal 1 above, requiring no entity resolution — just a lookup table of common organizations and their domains.
+Apply a rule: if `domain in SOCIAL_DOMAINS AND word_count < 100`, apply 0.5× ranking penalty. Prevents 17-word Reddit comments and 23-word Instagram reels from occupying top positions.
 
-```python
-ENTITY_DOMAINS = {
-    "goldman sachs": "goldmansachs.com",
-    "jr east": "jreast.co.jp",
-    "nasa giss": "giss.nasa.gov",
-    "noaa cpc": "cpc.ncep.noaa.gov",
-    "undp": "undp.org",
-    "tc39": "tc39.es",
-    "uspto": "uspto.gov",
-}
-```
+---
+
+#### Quick Win 4 — Scrape_score Sanity Assertion (+0 score, prevents regression)
+
+Add a runtime assertion: if `scrape_reasoning` contains "faithfully" AND `scrape_issues` is empty, then `scrape_score` must be ≥ 0.70. This catches the inversion bug before it propagates into fidelity aggregation and flags calibration drift in future runs.
 
 ---
 
 ## Judge Bias Warnings
 
-The Judge model (Qwen3-235B) exhibited one systematic bias pattern:
+![Diagnostics — Per-TC root cause diagnosis cards](./screenshots_new/rl_diagnostics.png)
 
-### ⚠️ Penalty for Image-Embedded Structured Data
+### ⚠️ Dual `_baseline_fidelity` Scoring Contradiction
 
-Pages that embed critical data in images (charts, graphs) or interactive JavaScript elements (toggle-able tabs, dynamic filters) receive low scrape quality scores because the extracted markdown is text-only and doesn't contain the expected structured data. However, this is a **scraper limitation, not a content quality failure**.
+In several TCs (most clearly `tc_a345a697` and `tc_e4e371ec`), the `_baseline_fidelity` dimension is evaluated twice — once by the `_aggregate_fidelity()` deterministic path and once by a P2 judge that received a custom fidelity-adjacent dimension routed to it. The two evaluations produce dramatically different scores:
 
-**Example:** `tc_121ff7e0` — ENSO NOAA CPC forecast:
-> *"Key CPC pages present critical forecast tables and probability charts only as images or links, resulting in missing structured data, low scrape quality scores (0.4–0.6). The Facebook post has perfect scrape quality but is irrelevant."*
+- `tc_a345a697`: Evaluation 1 → 0.9 (L5, "faithfully reproduces"), Evaluation 2 → 0.312 (L2, inverted score)
+- `tc_e4e371ec`: Evaluation 1 → 0.9 (L5), Evaluation 2 → 0.228 (L2)
 
-The judge correctly identifies the markdown is poor, but doesn't distinguish between:
-- A page that has no data (genuine quality failure)
-- A page that has data in non-text form (scraper limitation, not page quality issue)
+This is a **routing conflict**, not a judge bias issue. When a TC's custom rubric contains a dimension with keywords like "structural_fidelity" or "content_fidelity," the `_route_dimensions()` keyword matcher assigns it to the coverage family (default catch-all), and it's evaluated by a P2 judge. The baseline enforcer then injects `_baseline_fidelity` on top. Two fidelity evaluations are now live, and the floor gate takes the minimum — which is always the inverted P1 score.
 
-**Implication for RL training:** DPO pairs generated from these cases may incorrectly penalize the URL selection of authoritative-but-image-heavy pages (NOAA, CPC, SEC filings). A separate signal should be added for "content-in-image" pages to prevent training the model to avoid official government data portals.
+**Fix:** Check if any custom dimension already covers fidelity before injecting `_baseline_fidelity`.
+
+### ⚠️ `source_authority` Scores HIGH While Per-TC Diagnoses Show Low-Authority Sources
+
+`source_authority` averages 0.838 across all TCs, with 12/17 TCs in the 0.8–1.0 range. This seems inconsistent with the 13 TCs showing social media pollution. However, this is not a bias issue — the `_baseline_authority` dimension (avg 0.73) is the one that correctly captures the authority failures. The custom `source_authority` dimensions were generated for TCs where authority was specifically tested (healthcare, academic) and not for the travel/social-media-heavy TCs.
 
 ---
 
-## Test Case Category & Intent Breakdown
+## Regression vs Previous Run
 
-### By Category
+| Metric | `run_20260701_152627` | `run_20260712_180951` | Change |
+|--------|----------------------|----------------------|--------|
+| Overall Score | 0.73 | **0.69** | -0.04 ⚠️ |
+| Pass Rate | 17% (5/30) | **0%** (0/30) | -17% ⚠️ |
+| Pass Threshold | 0.80 | 0.65 (lower!) | — |
+| Generator Model | deepseek/deepseek-v4-flash | minimax/minimax-m3 | Changed |
+| Dominant Dimension | Scrape 0.50 | `_baseline_fidelity` 0.40 | Structural |
 
-| Category | Count | Pass Rate | Avg Score | Primary Bottleneck |
-|----------|-------|-----------|-----------|-------------------|
-| `structured_data_extraction` | ~14 | ~14% | ~0.71 | JS tables + truncation |
-| `rapidly_changing` | ~5 | ~20% | ~0.72 | Dynamic content, freshness |
-| `paywalled_content` | ~2 | ~0% | ~0.70 | Access blocks |
-| `pdf_document` | ~2 | ~50% | ~0.75 | Table parsing |
-| `code_documentation` | ~2 | ~50% | ~0.77 | Ranking (blog > docs) |
-| `long_form_article` | ~3 | ~33% | ~0.76 | Truncation |
-| `nav_heavy_portal` | ~2 | ~50% | ~0.77 | Navigation noise |
+**Important context:** These runs are not directly comparable. The architecture changed substantially:
 
-> Note: exact per-category counts derive from `run.json`; inferred here from the TC catalog.
+1. The pass threshold was **lowered from 0.80 to 0.65** — if applied to the previous run, more TCs would have passed. The 0% pass rate this run reflects the new dimension floor gate (no dimension below 0.40), which didn't exist before.
+2. The previous run used a hardcoded 3-axis rubric; this run uses dynamic per-TC rubrics with 2–4 custom axes plus baseline enforcement.
+3. The previous run's "Scrape" score (0.50) is structurally equivalent to the new `_baseline_fidelity` (0.40) — both measure scrape quality and both are the primary bottleneck.
 
-### By Intent
+**True regression vs improvement:**
+- The scrape quality problem has **not improved** — fidelity went from 0.50 → 0.40 average (though the measurement systems differ)
+- The ranking quality problem is **consistent** — 0.88 → 0.48 looks like regression but the previous 0.88 was a clean 3-axis average; 0.48 reflects the harder rubric with explicit contrastive fail checks
+- The **root cause diagnosis system is dramatically better** — we now have 67 contrastive fail pairs vs 0, 30 query reformulations vs 0, and per-TC diagnosis depth that didn't exist before
 
-| Intent | Affected TCs | Ranking Issues | Scrape Issues |
-|--------|-------------|----------------|--------------|
-| `factual_lookup` | ~12 | Authority ranking (official > blog) | Truncation |
-| `data_extraction` | ~10 | Social media demotion needed | JS tables |
-| `comparative_research` | ~4 | Named-entity multi-source | Missing one of N sources |
-| `semantic_near_miss` (cache test) | ~9 | N/A (cache hit) | N/A |
+Regression detector flagged: **trend = Regression Detected ⚠️, difference = -0.16**
+
+This is technically correct but should be read in context: the new architecture is surfacing failures the old system was not sensitive enough to detect.
 
 ---
 
@@ -733,31 +794,36 @@ The judge correctly identifies the markdown is poor, but doesn't distinguish bet
 
 ### What This Run Proved
 
-1. ✅ **Firecrawl's search recall is excellent.** A 0.92 coverage score across highly diverse domains proves the index is broad and keyword recall is strong.
+1. 🔴 **The P1 scrape_score calibration is broken.** The single highest-priority fix in the entire system is the `content_completeness`-based scrape_score correction. Without it, the floor gate fires on TCs where the actual retrieval quality is excellent.
 
-2. ✅ **Firecrawl's ranking is directionally correct.** A 0.88 NDCG@5 shows it consistently returns the right *documents* — the ordering just needs authority boosting for data queries.
+2. 🔴 **Social media content ranking is the most persistent structural failure.** 43% of TCs have thin social media content outranking specialist authoritative sources. This is a Firecrawl-side ranking signal issue that can be partially mitigated with post-retrieval re-ranking.
 
-3. ❌ **Scraping is the system's critical weakness.** 50% average scrape quality is the single biggest opportunity. Addressing RC-001 (JS rendering) and RC-002 (truncation) alone would push the overall score from 0.73 to an estimated **0.85–0.88** — above the 0.80 pass threshold.
+3. 🟡 **Multi-hop queries expose a fundamental architectural gap.** The pipeline issues single queries and cannot decompose 3-hop compound queries. 4 TCs failed on this pattern, with 0 data for hops 2–3 despite searching.
 
-4. 🔬 **The cache system works correctly.** 88.9% of semantic near-miss variants triggered cache hits. Layer 2 content deduplication is functioning.
+4. ✅ **Topical coverage and freshness are genuine strengths.** Dimensions like `topical_coverage` (0.85), `_baseline_freshness` (0.81), `drift_recovery` (0.95) score high consistently. Firecrawl's search recall is broad and fresh.
 
-5. 🔬 **The internal RRF KB should not be used for re-ranking.** Firecrawl's native ranking (τ=0.453, Overlap@3=0.711) is significantly better than our KB ranking (τ=-0.367, Overlap@3=0.322).
+5. ✅ **The rubric-first architecture is producing rich, actionable RL signal.** 500 training signals across 7 types, including 67 contrastive fail pairs and 30 query reformulations, are ready for downstream model training.
+
+6. ✅ **The chaos archetype system works as designed.** `multi_hop_compressed` (avg 0.51) and `over_decomposed` (avg 0.61) correctly expose architectural gaps that clean queries miss.
 
 ### Immediate Actions (Next 2 Weeks)
 
-- [ ] **Quick Win 1:** Deploy social media demotion filter for `data_extraction` intent queries
-- [ ] **Quick Win 2:** Increase `MAX_MARKDOWN_CHARS` from 8000 to 16000 and adjust `MAX_CHUNKS_PER_DOC` to 8
-- [ ] **Quick Win 3:** Build `ENTITY_DOMAINS` lookup table and add `site:` parallel search
+- [ ] **Quick Win 1:** Add `content_completeness`-based scrape_score floor enforcement in `_validate_p1_consistency()` — this is a 5-line change in `eval/judge.py`
+- [ ] **Quick Win 2:** Add error-page detection and removal filter in `pipeline/orchestrator.py` post-scrape
+- [ ] **Quick Win 3:** Add `word_count < 100` social media ranking penalty in post-retrieval step
+- [ ] **Quick Win 4:** Add runtime scrape_score sanity assertion to prevent future calibration drift
+- [ ] **Investigate:** KB indexing failure — all 30 rounds indexed 0 chunks; check `session.log` for indexer exceptions
 
 ### Next Eval Cycle Goals
 
-- [ ] Run 50 TC cycle after Quick Wins are deployed — target overall score ≥ 0.80
-- [ ] Include more `paywalled_content` TCs to build better paywall failure signal
-- [ ] Add a `pdf_document` specific test category focused on financial reports and regulatory filings
-- [ ] Evaluate the effect of JS rendering on a subset of 10 TCs before full rollout
+- [ ] Run 30 TC cycle after Quick Wins deployed — target fidelity floor > 0.45 and pass rate > 30%
+- [ ] Include 5 TCs with explicit `copy_paste_artifact` archetype (not sampled this run)
+- [ ] Add "easy" difficulty TCs to establish a clean baseline above the noise
+- [ ] Investigate whether SFT gold threshold of 0.85 is reachable — consider lowering to 0.80 for this run profile
 
 ---
 
-*Report generated by the Firecrawl Eval Showcase pipeline — `run_20260701_152627`*
-*Full raw data: `outputs/runs/run_20260701_152627/run.json`*
-*Individual TC reports: `outputs/runs/run_20260701_152627/tc_reports/`*
+*Report generated by EvalOS Framework — `run_20260712_180951`*  
+*Full raw data: `outputs/runs/run_20260712_180951/run.json`*  
+*Individual TC reports: `outputs/runs/run_20260712_180951/tc_reports/`*  
+*RL Signals: `outputs/runs/run_20260712_180951/rl_signals/`*

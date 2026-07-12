@@ -31,7 +31,7 @@ class EvalConfig:
     judge_max_retries: int = 2
 
     # Eval settings
-    num_test_cases: int = 3
+    num_test_cases: int = 30
     search_results_per_query: int = 5
     scrape_top_n: int = 5
     pass_threshold: float = 0.65
