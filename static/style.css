@@ -70,6 +70,7 @@ code, pre {
 /* ── Sidebar ── */
 .sidebar {
     width: 280px;
+    flex-shrink: 0;
     background: var(--bg-surface);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
@@ -290,6 +291,7 @@ code, pre {
 .view-container {
     flex: 1;
     overflow-y: auto;
+    overflow-x: auto;
     padding: 24px;
     position: relative;
 }
@@ -455,7 +457,11 @@ code, pre {
 }
 
 .timeline-content h4 { margin: 0 0 8px 0; font-size: 0.95rem; display: flex; justify-content: space-between; }
-.timeline-content .tc-id { color: var(--accent-2); font-family: 'JetBrains Mono', monospace; }
+.timeline-content .tc-id { color: var(--accent-2); font-family: 'JetBrains Mono', monospace; cursor: pointer; transition: opacity 0.2s; }
+.timeline-content .tc-id:hover { opacity: 0.8; text-decoration: underline; }
+
+.live-timeline-feed.filtering .timeline-item { display: none; }
+.live-timeline-feed.filtering .timeline-item.match-filter { display: flex; }
 
 .timeline-stages {
     display: flex;
@@ -824,4 +830,43 @@ code, pre {
 /* Reduced Motion */
 @media (prefers-reduced-motion: reduce) {
     * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+/* ── Responsive Adaptability ── */
+@media (max-width: 1024px) {
+    .app-container {
+        flex-direction: column;
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
+    .sidebar {
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 4px 32px rgba(0,0,0,0.4);
+    }
+    .runs-list {
+        max-height: 200px;
+    }
+    .main-content {
+        overflow: visible;
+    }
+    body {
+        overflow: auto;
+    }
+    .top-nav {
+        overflow-x: auto;
+        padding: 0 16px;
+        white-space: nowrap;
+    }
+    .live-layout {
+        grid-template-columns: 1fr;
+    }
+    .stats-row {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .kb-stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
 }

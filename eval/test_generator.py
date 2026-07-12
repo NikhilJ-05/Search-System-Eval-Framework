@@ -403,6 +403,9 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                     last_error = f"Response was not valid JSON: {e}"
                     logger.warning(f"JSON parse error on attempt {attempt+1}: {e}")
                 except Exception as e:
+                    if "client has been closed" in str(e):
+                        logger.debug("OpenRouter client closed during generation (likely pipeline shutdown).")
+                        break
                     last_error = str(e)
                     logger.warning(f"Error generating test case on attempt {attempt+1}: {e}")
             return None
@@ -563,6 +566,9 @@ Output ONLY the JSON object. Do not include markdown wraps or commentary.
                 last_error = f"Response was not valid JSON: {e}"
                 logger.warning(f"JSON parse error on cache variant attempt {attempt+1}: {e}")
             except Exception as e:
+                if "client has been closed" in str(e):
+                    logger.debug("OpenRouter client closed during cache variant generation.")
+                    break
                 last_error = str(e)
                 logger.warning(f"Error generating cache variant on attempt {attempt+1}: {e}")
         return None

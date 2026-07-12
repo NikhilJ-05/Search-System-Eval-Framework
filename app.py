@@ -64,15 +64,15 @@ async def serve_css():
 
 @app.get("/api/runs")
 async def list_runs():
-    return store.list_runs_with_meta()
+    return await asyncio.to_thread(store.list_runs_with_meta)
 
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
-    data = store._get_full_run(run_id)
+    data = await asyncio.to_thread(store._get_full_run, run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
         
-    meta = store.get_run_status(run_id) or {}
+    meta = await asyncio.to_thread(store.get_run_status, run_id) or {}
     config = data.get("run_meta", {})
     
     dimensions = []
@@ -94,14 +94,14 @@ async def get_run(run_id: str):
 
 @app.get("/api/runs/{run_id}/status")
 async def get_run_status(run_id: str):
-    data = store.get_run_status(run_id)
+    data = await asyncio.to_thread(store.get_run_status, run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run meta not found"})
     return data
 
 @app.get("/api/runs/{run_id}/dimensions")
 async def get_run_dimensions(run_id: str):
-    data = store._get_full_run(run_id)
+    data = await asyncio.to_thread(store._get_full_run, run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
     
@@ -119,7 +119,7 @@ async def get_run_dimensions(run_id: str):
 
 @app.get("/api/runs/{run_id}/live")
 async def get_run_live(run_id: str):
-    data = store._get_full_run(run_id)
+    data = await asyncio.to_thread(store._get_full_run, run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
     return data
@@ -158,7 +158,7 @@ async def get_tc_report(run_id: str, tc_id: str):
 
 @app.get("/api/runs/{run_id}/test-cases")
 async def get_run_test_cases(run_id: str):
-    data = store._get_full_run(run_id)
+    data = await asyncio.to_thread(store._get_full_run, run_id)
     if data is None:
         return JSONResponse(status_code=404, content={"detail": "Run not found"})
     return data.get("test_cases", [])
@@ -174,7 +174,7 @@ async def start_run(background_tasks: BackgroundTasks):
         await asyncio.sleep(7200)
         active_queues.pop(run_id, None)
         
-    background_tasks.add_task(_cleanup_queue_after_timeout)
+    asyncio.create_task(_cleanup_queue_after_timeout())
     
     async def run_pipeline_task():
         # ContextVar requires running within context
@@ -203,12 +203,13 @@ async def stream_run(request: Request, run_id: str):
                     event = await asyncio.wait_for(q.get(), timeout=1.0)
                     yield json.dumps(event)
                     if event.get("type") in ("run_complete", "run_error"):
+                        if run_id in active_queues:
+                            del active_queues[run_id]
                         break
                 except asyncio.TimeoutError:
                     yield json.dumps({"type": "ping", "time": time.time()})
         finally:
-            if run_id in active_queues:
-                del active_queues[run_id]
+            pass
                 
     return EventSourceResponse(event_generator())
 
@@ -221,64 +222,124 @@ async def search_kb(q: str):
 async def get_kb_stats():
     qdrant_stats = await qdrant.get_collection_stats()
     points = qdrant_stats.get("points_count", 0)
+    
+    unique_urls = set()
+    try:
+        scroll_res, _ = await qdrant.client.scroll(
+            collection_name=config.qdrant_collection,
+            limit=10000,
+            with_payload=["url"],
+            with_vectors=False
+        )
+        for p in scroll_res:
+            if p.payload and "url" in p.payload:
+                unique_urls.add(p.payload["url"])
+    except Exception:
+        pass
+
     return {
         "points_count": points,
         "vectors_count": qdrant_stats.get("vectors_count", 0),
-        "unique_urls": points,
+        "unique_urls": len(unique_urls),
         "deduped_count": 0,
         "status": qdrant_stats.get("status", "ok")
     }
 
+@app.get("/api/kb/recent")
+async def get_recent_kb():
+    try:
+        scroll_res, _ = await qdrant.client.scroll(
+            collection_name=config.qdrant_collection,
+            limit=2000,
+            with_payload=True,
+            with_vectors=False
+        )
+        docs = {}
+        for p in scroll_res:
+            if not p.payload: continue
+            url = p.payload.get("url")
+            if not url: continue
+            if url not in docs:
+                docs[url] = {
+                    "url": url,
+                    "chunks": [],
+                    "timestamp": p.payload.get("scrape_timestamp", 0)
+                }
+            docs[url]["chunks"].append({
+                "idx": p.payload.get("chunk_index", 0),
+                "content": p.payload.get("content", "")
+            })
+            docs[url]["timestamp"] = max(docs[url]["timestamp"], p.payload.get("scrape_timestamp", 0))
+            
+        result = []
+        for doc in docs.values():
+            doc["chunks"].sort(key=lambda x: x["idx"])
+            stitched = "\n".join([c["content"] for c in doc["chunks"]])
+            result.append({
+                "url": doc["url"],
+                "content": stitched,
+                "timestamp": doc["timestamp"]
+            })
+            
+        result.sort(key=lambda x: x["timestamp"], reverse=True)
+        return result[:20]
+    except Exception as e:
+        logger.error(f"Error fetching recent kb: {e}")
+        return []
+
 @app.get("/api/rl/signals/{run_id}")
 async def get_rl_signals(run_id: str):
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    rl_dir = os.path.join(base_dir, "outputs", "runs", run_id, "rl_signals")
-    old_dir = os.path.join(base_dir, "outputs", "rl_signals")
-    
-    dpo_pairs = []
-    rewards = []
-    taxonomy = []
-    
-    dpo_p = os.path.join(rl_dir, "dpo_pairs.jsonl")
-    if not os.path.exists(dpo_p): dpo_p = os.path.join(old_dir, f"dpo_pairs_{run_id}.jsonl")
-    if os.path.exists(dpo_p):
-        with open(dpo_p, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip(): dpo_pairs.append(json.loads(line))
+    def load_signals():
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        rl_dir = os.path.join(base_dir, "outputs", "runs", run_id, "rl_signals")
+        old_dir = os.path.join(base_dir, "outputs", "rl_signals")
+        
+        dpo_pairs = []
+        rewards = []
+        taxonomy = []
+        
+        dpo_p = os.path.join(rl_dir, "dpo_pairs.jsonl")
+        if not os.path.exists(dpo_p): dpo_p = os.path.join(old_dir, f"dpo_pairs_{run_id}.jsonl")
+        if os.path.exists(dpo_p):
+            with open(dpo_p, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip(): dpo_pairs.append(json.loads(line))
+                    
+        rew_p = os.path.join(rl_dir, "rewards.jsonl")
+        if not os.path.exists(rew_p): rew_p = os.path.join(old_dir, f"rewards_{run_id}.jsonl")
+        if os.path.exists(rew_p):
+            with open(rew_p, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip(): rewards.append(json.loads(line))
+                    
+        tax_p = os.path.join(rl_dir, "taxonomy.json")
+        if not os.path.exists(tax_p): tax_p = os.path.join(old_dir, f"taxonomy_{run_id}.json")
+        if os.path.exists(tax_p):
+            with open(tax_p, "r", encoding="utf-8") as f:
+                taxonomy = json.load(f)
                 
-    rew_p = os.path.join(rl_dir, "rewards.jsonl")
-    if not os.path.exists(rew_p): rew_p = os.path.join(old_dir, f"rewards_{run_id}.jsonl")
-    if os.path.exists(rew_p):
-        with open(rew_p, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip(): rewards.append(json.loads(line))
-                
-    tax_p = os.path.join(rl_dir, "taxonomy.json")
-    if not os.path.exists(tax_p): tax_p = os.path.join(old_dir, f"taxonomy_{run_id}.json")
-    if os.path.exists(tax_p):
-        with open(tax_p, "r", encoding="utf-8") as f:
-            taxonomy = json.load(f)
-            
-    # Load additional rich details from run.json if present
-    tc_diagnoses = []
-    improvement_analysis = {}
-    run_file = os.path.join(base_dir, "outputs", "runs", run_id, "run.json")
-    if os.path.exists(run_file):
-        try:
-            with open(run_file, "r", encoding="utf-8") as f:
-                run_data = json.load(f)
-                tc_diagnoses = run_data.get("tc_diagnoses", [])
-                improvement_analysis = run_data.get("improvement_analysis", {})
-        except Exception as e:
-            logger.error(f"Error loading run.json for RL signals: {e}")
+        # Load additional rich details from run.json if present
+        tc_diagnoses = []
+        improvement_analysis = {}
+        run_file = os.path.join(base_dir, "outputs", "runs", run_id, "run.json")
+        if os.path.exists(run_file):
+            try:
+                with open(run_file, "r", encoding="utf-8") as f:
+                    run_data = json.load(f)
+                    tc_diagnoses = run_data.get("tc_diagnoses", [])
+                    improvement_analysis = run_data.get("improvement_analysis", {})
+            except Exception as e:
+                logger.error(f"Error loading run.json for RL signals: {e}")
 
-    return {
-        "dpo_pairs": dpo_pairs,
-        "reward_signals": rewards,
-        "taxonomy": taxonomy,
-        "tc_diagnoses": tc_diagnoses,
-        "improvement_analysis": improvement_analysis
-    }
+        return {
+            "dpo_pairs": dpo_pairs,
+            "reward_signals": rewards,
+            "taxonomy": taxonomy,
+            "tc_diagnoses": tc_diagnoses,
+            "improvement_analysis": improvement_analysis
+        }
+    
+    return await asyncio.to_thread(load_signals)
 
 if __name__ == "__main__":
     import uvicorn

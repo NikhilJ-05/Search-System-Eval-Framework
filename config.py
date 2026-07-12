@@ -11,7 +11,7 @@ class EvalConfig:
     openrouter_keys: list[str] = field(default_factory=list)
     generator_providers: list[str] = field(default_factory=lambda: ["Parasail", "Together", "DeepInfra"])
     p1_providers: list[str] = field(default_factory=lambda: ["Baidu", "GMICloud", "Fireworks"])
-    p2_providers: list[str] = field(default_factory=lambda: ["DeepSeek", "StreamLake", "Baidu"])
+    p2_providers: list[str] = field(default_factory=lambda: ["Baidu", "GMICloud", "Fireworks"])
     improvement_agent_providers: list[str] = field(default_factory=lambda: ["StreamLake", "Novita"])
 
     # Qdrant
@@ -22,7 +22,7 @@ class EvalConfig:
     # Models (OpenRouter slugs)
     generator_model: str = "minimax/minimax-m3"
     p1_model: str = "deepseek/deepseek-v4-flash"
-    p2_model: str = "deepseek/deepseek-v4-pro"
+    p2_model: str = "deepseek/deepseek-v4-flash"
 
     improvement_agent_model: str = "z-ai/glm-5.2"
 
@@ -47,7 +47,6 @@ class EvalConfig:
     query_cache_eviction_max_age_seconds: int = 3600
 
     # Concurrency settings
-    max_concurrent_tcs: int = 10
 
     # Archetype weights (must sum to 1.0)
     archetype_weights: dict = field(default_factory=lambda: {
@@ -64,7 +63,7 @@ class EvalConfig:
     @classmethod
     def from_env(cls) -> "EvalConfig":
         _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        load_dotenv(_env_path)
+        load_dotenv(_env_path, override=True)
         
         # Load Firecrawl keys
         f_keys = [
@@ -116,7 +115,6 @@ class EvalConfig:
         set_if_present("KB_FRESHNESS_WINDOW", "kb_freshness_window_seconds", int)
         set_if_present("QUERY_CACHE_THRESHOLD", "query_cache_similarity_threshold", float)
         set_if_present("JUDGE_RESULT_TTL", "judge_result_cache_ttl", int)
-        set_if_present("MAX_CONCURRENT_TCS", "max_concurrent_tcs", int)
         
         set_if_present("PASS_THRESHOLD", "pass_threshold", float)
         set_if_present("DIMENSION_FLOOR", "dimension_floor", float)

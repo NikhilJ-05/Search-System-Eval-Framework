@@ -177,6 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/runs', { method: 'POST' });
             const data = await res.json();
             const runId = data.run_id;
+            currentRunId = runId;
 
             tabBtns[0].click(); // Live view
             document.getElementById('header-run-id').textContent = `Live: ${runId}`;
@@ -211,10 +212,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (ev.type === 'run_complete') {
                     dot.className = 'dot done';
-                    statusText.textContent = `Complete | score=${ev.overall_score?.toFixed(3)}`;
+                    statusText.textContent = `Complete | score=${ev.overall_score?.toFixed(3)} | ⏱️ ${ev.duration_s?.toFixed(1)}s`;
                     prog.style.width = '100%';
                     sseSource.close();
-                    showToast('Run Complete', `Evaluation finished with score ${ev.overall_score?.toFixed(3)}`, 'success');
+                    showToast('Run Complete', `Evaluation finished in ${ev.duration_s?.toFixed(1)}s with score ${ev.overall_score?.toFixed(3)}`, 'success');
                     loadRuns();
                     loadRunDetails(runId);
                 } else if (ev.type === 'run_error') {
@@ -235,6 +236,44 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast('Error', 'Failed to start run', 'error');
         }
     });
+
+    let currentTimelineFilter = null;
+    
+    window.getTcColor = function(tcId) {
+        if (!tcId) return 'var(--accent-2)';
+        let hash = 0;
+        for (let i = 0; i < tcId.length; i++) {
+            hash = tcId.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        return `hsl(${Math.abs(hash) % 360}, 75%, 65%)`;
+    };
+
+    window.toggleTimelineFilter = function(tcId, event) {
+        if (event) event.stopPropagation();
+        const feed = document.getElementById('live-timeline-feed');
+        if (currentTimelineFilter === tcId) {
+            currentTimelineFilter = null;
+            feed.classList.remove('filtering');
+            window.showToast('Filter Cleared', 'Showing all test cases');
+        } else {
+            currentTimelineFilter = tcId;
+            feed.classList.add('filtering');
+            feed.querySelectorAll('.timeline-item').forEach(el => {
+                if (el.dataset.tc === tcId) {
+                    el.classList.add('match-filter');
+                } else {
+                    el.classList.remove('match-filter');
+                }
+            });
+            window.showToast('Timeline Filtered', `Showing only logs for ${tcId}`, 'info');
+        }
+    };
+    
+    window.createTcBadge = function(tcId) {
+        if (!tcId) return '';
+        const color = window.getTcColor(tcId);
+        return `<span class="tc-id" style="color: ${color}; border: 1px solid ${color}40; background: ${color}10; padding: 2px 6px; border-radius: 4px;" onclick="window.toggleTimelineFilter('${tcId}', event)">${tcId}</span>`;
+    };
 
     function handleLiveEvent(ev, feed, prog, liveScores) {
         if (ev.type === 'state_update') {
@@ -267,8 +306,22 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        let timeStr = '';
+        if (ev.timestamp) {
+            const dt = new Date(ev.timestamp * 1000);
+            timeStr = dt.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
         const item = document.createElement('div');
         item.className = 'timeline-item';
+        if (ev.tc_id) {
+            item.dataset.tc = ev.tc_id;
+            if (currentTimelineFilter === ev.tc_id) {
+                item.classList.add('match-filter');
+            }
+        } else {
+            item.dataset.tc = 'global';
+        }
         
         let iconChar = ICONS[ev.type] || ICONS.default;
         let iconClass = 'active';
@@ -286,27 +339,28 @@ document.addEventListener('DOMContentLoaded', () => {
             contentHtml = `<h4>${ev.message || ev.phase + ' started'}</h4>`;
         } else if (ev.type === 'firecrawl_search_done') {
             contentHtml = `
-                <h4>Search Complete <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Search Complete ${window.createTcBadge(ev.tc_id)}</h4>
                 <div style="font-size: 0.85rem; color:var(--text-secondary)">Retrieved ${ev.result_count} results</div>
             `;
         } else if (ev.type === 'dimension_scored') {
             contentHtml = `
-                <h4>Dimension Scored <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Dimension Scored ${window.createTcBadge(ev.tc_id)}</h4>
                 <div style="font-size: 0.85rem; margin-top:4px;">
                     <strong>${ev.dimension}</strong>: <span style="color:var(--accent-2)">${ev.score.toFixed(3)}</span>
                 </div>
             `;
         } else if (ev.type === 'diagnosis') {
             contentHtml = `
-                <h4>Diagnosis Triggered <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Diagnosis Triggered ${window.createTcBadge(ev.tc_id)}</h4>
                 <p style="font-size: 0.8rem; margin:4px 0 0 0; color:var(--text-secondary)">Detected underperformance. Analyzing root cause...</p>
             `;
             showToast('Diagnosis Initiated', `TC ${ev.tc_id} scored poorly. Running diagnostics.`, 'warning');
         } else if (ev.type === 'tc_complete') {
             contentHtml = `
-                <h4>Test Case Complete <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Test Case Complete ${window.createTcBadge(ev.tc_id)}</h4>
                 <div class="timeline-stages">
                     <span class="stage-pill done">Overall: ${ev.overall.toFixed(3)}</span>
+                    ${ev.duration_s ? `<span class="stage-pill">⏱️ ${ev.duration_s.toFixed(1)}s</span>` : ''}
                 </div>
             `;
             
@@ -315,7 +369,7 @@ document.addEventListener('DOMContentLoaded', () => {
             card.className = 'live-tc-item';
             card.innerHTML = `
                 <div class="live-tc-info">
-                    <span class="live-tc-id">${ev.tc_id}</span>
+                    ${window.createTcBadge(ev.tc_id)}
                 </div>
                 <div class="live-tc-score" style="color:${ev.passed ? 'var(--success)' : 'var(--warning)'}">${ev.overall.toFixed(3)}</div>
             `;
@@ -331,20 +385,39 @@ document.addEventListener('DOMContentLoaded', () => {
             return; // don't add to timeline to reduce noise
         } else if (ev.type === 'query_cache_hit') {
             contentHtml = `
-                <h4>Cache Hit <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Cache Hit ${window.createTcBadge(ev.tc_id)}</h4>
                 <div style="font-size: 0.85rem; color:var(--text-secondary)">Similarity: ${(ev.similarity || 0).toFixed(2)}</div>
             `;
         } else if (ev.type === 'firecrawl_scrape_done') {
             contentHtml = `
-                <h4>Scrape Done <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Scrape Done ${window.createTcBadge(ev.tc_id)}</h4>
                 <div style="font-size: 0.85rem; color:var(--text-secondary)">URL: ${ev.url}</div>
             `;
         } else if (ev.type === 'tc_diagnosis_complete') {
             contentHtml = `
-                <h4>Diagnosis Complete <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Diagnosis Complete ${window.createTcBadge(ev.tc_id)}</h4>
                 <p style="font-size: 0.85rem; margin:4px 0 0 0;">Root cause analyzed for failure.</p>
             `;
             iconClass = 'warning';
+        } else if (ev.type === 'tc_report_ready') {
+            contentHtml = `
+                <h4>Report Ready ${window.createTcBadge(ev.tc_id)}</h4>
+                <p style="font-size: 0.85rem; margin:4px 0 0 0; color:var(--text-secondary)">Detailed Markdown report generated.</p>
+            `;
+            iconClass = 'success';
+            
+            // Auto-load if the row is expanded
+            if (currentRunData) {
+                const tcIndex = currentRunData.findIndex(t => t.test_case_id === ev.tc_id);
+                if (tcIndex !== -1) {
+                    const row = document.getElementById(`exp-row-${tcIndex}`);
+                    if (row && row.style.display !== 'none') {
+                        const el = document.getElementById(`tc-report-content-${tcIndex}`);
+                        if (el) el.dataset.loaded = 'false';
+                        window.loadTcReport(currentRunId, ev.tc_id, tcIndex);
+                    }
+                }
+            }
         } else if (ev.type === 'round_complete') {
             contentHtml = `
                 <h4>Round Complete <span class="tc-id">Round ${ev.round}</span></h4>
@@ -352,7 +425,7 @@ document.addEventListener('DOMContentLoaded', () => {
             iconClass = 'success';
         } else if (ev.type === 'judge_scored') {
             contentHtml = `
-                <h4>Judge Scored <span class="tc-id">${ev.tc_id}</span></h4>
+                <h4>Judge Scored ${window.createTcBadge(ev.tc_id)}</h4>
                 <div style="font-size: 0.85rem; margin-top:4px;">
                     Overall: <span style="color:var(--accent-2)">${ev.overall.toFixed(3)}</span>
                 </div>
@@ -365,7 +438,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         item.innerHTML = `
             <div class="timeline-icon ${iconClass}">${iconChar}</div>
-            <div class="timeline-content">${contentHtml}</div>
+            <div class="timeline-content">
+                ${timeStr ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 2px;">${timeStr}</div>` : ''}
+                ${contentHtml}
+            </div>
         `;
         
         // Remove empty message if present
@@ -748,15 +824,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('kb-search-btn').addEventListener('click', async () => {
         const q = document.getElementById('kb-search-input').value.trim();
-        if (!q) return;
+        if (!q) {
+            loadRecentKB();
+            return;
+        }
         const container = document.getElementById('kb-results');
         container.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
         try {
             const res = await fetch(`/api/kb/search?q=${encodeURIComponent(q)}`);
             const results = await res.json();
-            container.innerHTML = '';
+            container.innerHTML = '<h3>Search Results</h3>';
             if (!results.length) {
-                container.innerHTML = '<div class="empty-msg">No results found</div>';
+                container.innerHTML += '<div class="empty-msg">No results found</div>';
                 return;
             }
             results.forEach(r => {
@@ -764,7 +843,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="kb-result-card">
                         <div class="kb-score">Score: ${r.score.toFixed(4)}</div>
                         <div class="kb-url"><a href="${r.url}" target="_blank">${r.url}</a></div>
-                        <div class="kb-snippet">${r.content ? r.content.substring(0, 250) + '...' : ''}</div>
+                        <div class="kb-snippet">${r.content ? escapeHtml(r.content).substring(0, 250) + '...' : ''}</div>
                     </div>
                 `;
             });
@@ -773,6 +852,49 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    async function loadRecentKB() {
+        const container = document.getElementById('kb-results');
+        container.innerHTML = '<div class="skeleton skeleton-card"></div>';
+        try {
+            const res = await fetch('/api/kb/recent');
+            const results = await res.json();
+            container.innerHTML = '<h3>Recently Scraped Documents</h3>';
+            if (!results.length) {
+                container.innerHTML += '<div class="empty-msg">No recent documents found</div>';
+                return;
+            }
+            results.forEach((r, idx) => {
+                const date = new Date(r.timestamp * 1000).toLocaleString();
+                container.innerHTML += `
+                    <div class="kb-result-card">
+                        <div class="kb-url"><a href="${r.url}" target="_blank">${r.url}</a> <span style="font-size:0.8rem;color:var(--text-muted);">(${date})</span></div>
+                        <div class="kb-snippet">
+                            <button class="expand-kb-btn" data-idx="${idx}" style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.8rem;margin-top:8px;">View Extracted Content</button>
+                            <div id="kb-full-${idx}" style="display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,0.2);border-radius:4px;max-height:300px;overflow-y:auto;white-space:pre-wrap;font-family:monospace;font-size:0.8rem;"></div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            document.querySelectorAll('.expand-kb-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const idx = e.target.dataset.idx;
+                    const contentDiv = document.getElementById(`kb-full-${idx}`);
+                    if (contentDiv.style.display === 'none') {
+                        contentDiv.textContent = results[idx].content;
+                        contentDiv.style.display = 'block';
+                        e.target.textContent = 'Hide Extracted Content';
+                    } else {
+                        contentDiv.style.display = 'none';
+                        e.target.textContent = 'View Extracted Content';
+                    }
+                });
+            });
+        } catch (e) {
+            container.innerHTML = `<div class="empty-msg">Error: ${e.message}</div>`;
+        }
+    }
+
     document.getElementById('kb-search-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') document.getElementById('kb-search-btn').click();
     });
@@ -780,4 +902,5 @@ document.addEventListener('DOMContentLoaded', () => {
     // INIT
     loadRuns();
     loadKBStats();
+    loadRecentKB();
 });

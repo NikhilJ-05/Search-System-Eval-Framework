@@ -224,7 +224,7 @@ class ImprovementAgent:
                     if check.status == "NOT_MET":
                         issue_type = f"{de.dimension_name}_NOT_MET"
                         issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
-            for p in getattr(res, 'document_profiles', []):
+            for p in (getattr(res, 'document_profiles', None) or []):
                 for gap in p.get("content_gaps", []):
                     issue_counts["Document_Gap"] = issue_counts.get("Document_Gap", 0) + 1
 

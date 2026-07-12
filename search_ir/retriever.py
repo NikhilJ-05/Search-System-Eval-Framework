@@ -189,8 +189,15 @@ class Retriever:
             self._get_kb_content_for_url_with_vectors(dense_vector, sparse_vector, url, score_threshold)
             for url in urls
         ]
-        results = await asyncio.gather(*tasks)
-        return {url: result for url, result in zip(urls, results)}
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        final_results = {}
+        for url, result in zip(urls, results):
+            if isinstance(result, Exception):
+                logger.error(f"[Retriever] Error fetching KB coverage for {url}: {result}")
+                final_results[url] = None
+            else:
+                final_results[url] = result
+        return final_results
 
     async def find_similar_query(
         self, query: str, threshold: float = 0.92, max_age_seconds: int = 120

@@ -14,6 +14,17 @@ import os
 import threading
 import time
 import webbrowser
+import warnings
+
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+        
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # ── pretty logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(

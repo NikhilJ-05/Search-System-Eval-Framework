@@ -1,17 +1,57 @@
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import VectorParams, Distance, SparseVectorParams, SparseIndexParams, PayloadSchemaType
 import logging
+import asyncio
 from config import EvalConfig
 
 logger = logging.getLogger(__name__)
 
+class SafeAsyncQdrantClient:
+    def __init__(self, *args, **kwargs):
+        self._client = AsyncQdrantClient(*args, **kwargs)
+        
+    async def _retry(self, func, *args, **kwargs):
+        for attempt in range(5):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                if attempt == 0:
+                    logger.debug(f"Qdrant connection dropped/cold. Waking up server... (error: {e})")
+                await asyncio.sleep(1)
+                
+    async def collection_exists(self, *args, **kwargs):
+        return await self._retry(self._client.collection_exists, *args, **kwargs)
+
+    async def create_collection(self, *args, **kwargs):
+        return await self._retry(self._client.create_collection, *args, **kwargs)
+
+    async def create_payload_index(self, *args, **kwargs):
+        return await self._retry(self._client.create_payload_index, *args, **kwargs)
+
+    async def get_collection(self, *args, **kwargs):
+        return await self._retry(self._client.get_collection, *args, **kwargs)
+
+    async def query_points(self, *args, **kwargs):
+        return await self._retry(self._client.query_points, *args, **kwargs)
+
+    async def scroll(self, *args, **kwargs):
+        return await self._retry(self._client.scroll, *args, **kwargs)
+
+    async def upsert(self, *args, **kwargs):
+        return await self._retry(self._client.upsert, *args, **kwargs)
+
+    async def delete(self, *args, **kwargs):
+        return await self._retry(self._client.delete, *args, **kwargs)
+
 class QdrantStore:
     def __init__(self, config: EvalConfig):
         self.config = config
-        self.client = AsyncQdrantClient(
+        self.client = SafeAsyncQdrantClient(
             url=self.config.qdrant_url,
             api_key=self.config.qdrant_key,
-            timeout=120.0
+            timeout=10.0
         )
 
     async def init_collection(self):
@@ -21,36 +61,32 @@ class QdrantStore:
 
         exists = False
         try:
-            if await self.client.collection_exists(self.config.qdrant_collection):
-                info = await self.client.get_collection(self.config.qdrant_collection)
-                # Verify schema compatibility
-                if hasattr(info, "config") and info.config:
-                    exists = True
-                else:
-                    exists = True
+            exists = await self.client.collection_exists(self.config.qdrant_collection)
         except Exception as e:
-            logger.warning(f"Error inspecting Qdrant collection {self.config.qdrant_collection}: {e}. Will recreate.")
-            try:
-                await self.client.delete_collection(self.config.qdrant_collection)
-            except Exception:
-                pass
+            logger.warning(f"Error inspecting Qdrant collection {self.config.qdrant_collection}: {e}.")
 
         if not exists:
             logger.info(f"Creating Qdrant collection: {self.config.qdrant_collection}")
-            await self.client.create_collection(
-                collection_name=self.config.qdrant_collection,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=1024,
-                        distance=Distance.COSINE
-                    )
-                },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams(
-                        index=SparseIndexParams(on_disk=False)
-                    )
-                }
-            )
+            try:
+                await self.client.create_collection(
+                    collection_name=self.config.qdrant_collection,
+                    vectors_config={
+                        "dense": VectorParams(
+                            size=1024,
+                            distance=Distance.COSINE
+                        )
+                    },
+                    sparse_vectors_config={
+                        "sparse": SparseVectorParams(
+                            index=SparseIndexParams(on_disk=False)
+                        )
+                    }
+                )
+            except Exception as e:
+                if "already exists" in str(e):
+                    logger.info(f"Collection {self.config.qdrant_collection} already exists, ignoring creation error.")
+                else:
+                    raise
         else:
             logger.info(f"Qdrant collection {self.config.qdrant_collection} verified and ready.")
             
@@ -73,27 +109,27 @@ class QdrantStore:
         cache_coll = "firecrawl_query_cache"
         exists = False
         try:
-            if await self.client.collection_exists(cache_coll):
-                await self.client.get_collection(cache_coll)
-                exists = True
+            exists = await self.client.collection_exists(cache_coll)
         except Exception as e:
-            logger.warning(f"Error inspecting Qdrant cache collection {cache_coll}: {e}. Will recreate.")
-            try:
-                await self.client.delete_collection(cache_coll)
-            except Exception:
-                pass
+            logger.warning(f"Error inspecting Qdrant cache collection {cache_coll}: {e}.")
 
         if not exists:
             logger.info(f"Creating Qdrant collection: {cache_coll}")
-            await self.client.create_collection(
-                collection_name=cache_coll,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=1024,
-                        distance=Distance.COSINE
-                    )
-                }
-            )
+            try:
+                await self.client.create_collection(
+                    collection_name=cache_coll,
+                    vectors_config={
+                        "dense": VectorParams(
+                            size=1024,
+                            distance=Distance.COSINE
+                        )
+                    }
+                )
+            except Exception as e:
+                if "already exists" in str(e):
+                    logger.info(f"Collection {cache_coll} already exists, ignoring creation error.")
+                else:
+                    raise
         else:
             logger.info(f"Qdrant collection {cache_coll} verified and ready.")
 

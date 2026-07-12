@@ -54,7 +54,7 @@ class Orchestrator:
         self.report_builder = ReportBuilder(config)
         self.regression_detector = RegressionDetector()
         self.improvement_agent = ImprovementAgent(config, self.or_pool)
-        self._background_tasks = []
+        self._background_tasks = set()
 
         
         self.live_tc_diagnoses = []
@@ -71,6 +71,8 @@ class Orchestrator:
         self.total_deduped = 0
 
     def _emit_event(self, event_data: dict):
+        if "timestamp" not in event_data:
+            event_data["timestamp"] = time.time()
         q = sse_queue_var.get()
         if q is not None:
             try:
@@ -129,112 +131,67 @@ class Orchestrator:
     ) -> Optional[IndexStats]:
         """Process a single test case with caching."""
         async with semaphore:
-            logger.info(f"[Pipeline R{round_idx}] ─── TC {tc_idx+1}/{total_in_batch}: {tc.id} | query={repr(tc.query[:60])}")
-            self._emit_event({
-                "type": "tc_processing", 
-                "tc_id": tc.id,
-                "query": tc.query,
-                "intent": getattr(tc, "intent", "unknown"),
-                "difficulty": getattr(tc, "difficulty", "unknown"),
-                "chaos_archetype": getattr(tc, "chaos_archetype", "none")
-            })
-            })
-            tc_new_entries = []
-            tc_stale_updates = []
-
-            # Layer 1: Query Cache
-            cached_query, query_dense_vec, query_sparse_vec = await self.retriever.find_similar_query(
-                tc.query,
-                threshold=self.config.query_cache_similarity_threshold,
-                max_age_seconds=self.config.query_cache_eviction_max_age_seconds
-            )
-            
-            if cached_query:
-                logger.info(f"[Pipeline] [{tc.id}] QUERY CACHE HIT (sim={cached_query['similarity']:.2f})")
-                fc_results = cached_query["results"]
-                for r in fc_results:
-                    r.query_cache_status = "hit"
-                    r.cache_similarity = cached_query["similarity"]
-                self._emit_event({"type": "query_cache_hit", "tc_id": tc.id, "similarity": cached_query["similarity"]})
-            else:
-                logger.info(f"[Pipeline] [{tc.id}] SEARCH (Query Cache Miss)")
-                fc_results, search_lat = await self.fc_pool.search(tc.query, limit=self.config.search_results_per_query)
-                for r in fc_results:
-                    r.query_cache_status = "miss"
+            tc_start_time = time.time()
+            try:
+                logger.info(f"[Pipeline R{round_idx}] ─── TC {tc_idx+1}/{total_in_batch}: {tc.id} | query={repr(tc.query[:60])}")
+                self._emit_event({
+                    "type": "tc_processing", 
+                    "tc_id": tc.id,
+                    "query": tc.query,
+                    "intent": getattr(tc, "intent", "unknown"),
+                    "difficulty": getattr(tc, "difficulty", "unknown"),
+                    "chaos_archetype": getattr(tc, "chaos_archetype", "none")
+                })
+                tc_new_entries = []
+                tc_stale_updates = []
+    
+                # Layer 1: Query Cache
+                cached_query, query_dense_vec, query_sparse_vec = await self.retriever.find_similar_query(
+                    tc.query,
+                    threshold=self.config.query_cache_similarity_threshold,
+                    max_age_seconds=self.config.query_cache_eviction_max_age_seconds
+                )
                 
-                # Save to query cache in background
-                asyncio.create_task(self.retriever.store_search_results(tc.query, fc_results, precomputed_dense_vec=query_dense_vec))
-                self._emit_event({"type": "firecrawl_search_done", "tc_id": tc.id, "result_count": len(fc_results), "latency_ms": search_lat})
-
-            # Layer 2: KB Hybrid Content Search (BM25 + Vector semantic per URL)
-            # For each URL Firecrawl returned, check the KB using the actual query — not just
-            # "does this URL exist?" but "does the KB have query-relevant content for this URL?"
-            top_results = fc_results[:self.config.scrape_top_n]
-            if top_results:
-                top_urls = [r.url for r in top_results]
-                logger.info(
-                    f"[Pipeline] [{tc.id}] KB HYBRID SEARCH for {len(top_urls)} URLs "
-                    f"(threshold={self.config.kb_content_score_threshold})"
-                )
-
-                # Single async batch: runs dense+sparse RRF per URL concurrently
-                kb_coverage = await self.retriever.get_kb_coverage_for_urls(
-                    query=tc.query,
-                    urls=top_urls,
-                    score_threshold=self.config.kb_content_score_threshold,
-                    precomputed_dense_vec=query_dense_vec,
-                    precomputed_sparse_vec=query_sparse_vec
-                )
-
-                scrape_tasks = []
-                for res in top_results:
-                    kb_entry = kb_coverage.get(res.url)
-
-                    if kb_entry:
-                        # Freshness check
-                        age = time.time() - kb_entry.get("scrape_timestamp", 0)
-                        if age < self.config.kb_freshness_window_seconds:
-                            logger.info(
-                                f"[Pipeline] [{tc.id}] KB SEMANTIC HIT  {res.url} "
-                                f"(score={kb_entry['score']:.3f}, {kb_entry['num_chunks']} chunks, age={age:.0f}s)"
-                            )
-                            res.full_markdown = kb_entry["content"]
-                            res.scrape_cache_status = "kb_semantic_hit"
-                            res.kb_meta = {
-                                "age_s": age,
-                                "content_hash": kb_entry["content_hash"],
-                                "kb_score": kb_entry["score"],
-                                "num_chunks": kb_entry["num_chunks"]
-                            }
-                            self._emit_event({
-                                "type": "firecrawl_scrape_done",
-                                "tc_id": tc.id, "url": res.url,
-                                "status": f"kb_semantic_hit(score={kb_entry['score']:.2f})"
-                            })
-                            continue
-                        else:
-                            logger.info(
-                                f"[Pipeline] [{tc.id}] KB SEMANTIC STALE {res.url} "
-                                f"(age={age:.0f}s). Re-scraping."
-                            )
-                            res.scrape_cache_status = "stale"
-                            res.kb_meta = {"old_hash": kb_entry["content_hash"]}
-                    else:
-                        logger.info(f"[Pipeline] [{tc.id}] KB SEMANTIC MISS {res.url}. Will scrape.")
-                        res.scrape_cache_status = "miss"
-
-                    scrape_tasks.append((res, self.fc_pool.scrape(res.url)))
-
-                if scrape_tasks:
-                    results_to_update, tasks = zip(*scrape_tasks)
-                    outputs = await asyncio.gather(*tasks, return_exceptions=True)
+                if cached_query:
+                    logger.info(f"[Pipeline] [{tc.id}] QUERY CACHE HIT (sim={cached_query['similarity']:.2f})")
+                    fc_results = cached_query["results"]
+                    for r in fc_results:
+                        r.query_cache_status = "hit"
+                        r.cache_similarity = cached_query["similarity"]
+                    self._emit_event({"type": "query_cache_hit", "tc_id": tc.id, "similarity": cached_query["similarity"]})
+                else:
+                    logger.info(f"[Pipeline] [{tc.id}] SEARCH (Query Cache Miss)")
+                    fc_results, search_lat = await self.fc_pool.search(tc.query, limit=self.config.search_results_per_query)
+                    for r in fc_results:
+                        r.query_cache_status = "miss"
                     
-                    for res, output in zip(results_to_update, outputs):
-                        if isinstance(output, Exception):
-                            logger.error(f"[Pipeline] [{tc.id}] Scrape error {res.url}: {output}")
-                            res.full_markdown = None
-                            res.status = f"error: {output}"
-                        else:
+                    # Save to query cache in background
+                    asyncio.create_task(self.retriever.store_search_results(tc.query, fc_results, precomputed_dense_vec=query_dense_vec))
+                    self._emit_event({"type": "firecrawl_search_done", "tc_id": tc.id, "result_count": len(fc_results), "latency_ms": search_lat})
+    
+                # Layer 2: KB Hybrid Content Search (BM25 + Vector semantic per URL)
+                # For each URL Firecrawl returned, check the KB using the actual query — not just
+                # "does this URL exist?" but "does the KB have query-relevant content for this URL?"
+                top_results = fc_results[:self.config.scrape_top_n]
+                if top_results:
+                    top_urls = [r.url for r in top_results]
+                    logger.info(
+                        f"[Pipeline] [{tc.id}] KB HYBRID SEARCH for {len(top_urls)} URLs "
+                        f"(threshold={self.config.kb_content_score_threshold})"
+                    )
+    
+                    # Single async batch: runs dense+sparse RRF per URL concurrently
+                    kb_coverage = await self.retriever.get_kb_coverage_for_urls(
+                        query=tc.query,
+                        urls=top_urls,
+                        score_threshold=self.config.kb_content_score_threshold,
+                        precomputed_dense_vec=query_dense_vec,
+                        precomputed_sparse_vec=query_sparse_vec
+                    )
+    
+                    async def _scrape_and_process(res):
+                        try:
+                            output = await self.fc_pool.scrape(res.url)
                             md, scrape_lat, status = output
                             res.full_markdown = md
                             res.scrape_latency_ms = scrape_lat
@@ -254,79 +211,167 @@ class Orchestrator:
                                         "old_hash": res.kb_meta["old_hash"],
                                         "new_hash": new_hash
                                     }
-                                    
+                        except Exception as e:
+                            logger.error(f"[Pipeline] [{tc.id}] Scrape error {res.url}: {e}")
+                            res.full_markdown = None
+                            res.status = f"error: {e}"
+                        
                         self._emit_event({"type": "firecrawl_scrape_done", "tc_id": tc.id, "url": res.url, "status": res.status})
 
-            # Fire indexing immediately — runs in background while LLM calls proceed
-            indexing_task = None
-            if tc_new_entries:
-                logger.info(f"[Pipeline] [{tc.id}] Launching background indexing for {len(tc_new_entries)} doc(s)...")
-                indexing_task = asyncio.create_task(
-                    self.indexer.index_batch_deduped(tc_new_entries)
-                )
-            for url, md, q in tc_stale_updates:
-                self._background_tasks.append(asyncio.create_task(self.indexer.update_existing(url, md, "", q)))
-
-            search_results_dict[tc.id] = fc_results
-
-            # Judge
-            logger.info(f"[Pipeline] [{tc.id}] JUDGE...")
-            eval_res = await self.judge.evaluate(tc, fc_results)
-            eval_results.append(eval_res)
-            logger.info(
-                f"[Pipeline] [{tc.id}] Judge: overall={eval_res.overall_score:.3f} "
-                f"cov={eval_res.coverage_score:.3f} rnk={eval_res.ranking_score:.3f} "
-                f"dims={len(eval_res.dimension_evals)}"
-            )
-
-            # Kick off live diagnostic analysis and reporting in the background
-            task = asyncio.create_task(self._post_judge_pipeline(tc, eval_res, fc_results, self.current_run_id))
-            self._background_tasks.append(task)
-
-            # Persist successfully processed test case to the test case history store
-            await self.history.append_async(tc)
-
-            for de in eval_res.dimension_evals:
+                    scrape_tasks = []
+                    for res in top_results:
+                        kb_entry = kb_coverage.get(res.url)
+    
+                        if kb_entry:
+                            # Freshness check
+                            age = time.time() - kb_entry.get("scrape_timestamp", 0)
+                            if age < self.config.kb_freshness_window_seconds:
+                                logger.info(
+                                    f"[Pipeline] [{tc.id}] KB SEMANTIC HIT  {res.url} "
+                                    f"(score={kb_entry['score']:.3f}, {kb_entry['num_chunks']} chunks, age={age:.0f}s)"
+                                )
+                                res.full_markdown = kb_entry["content"]
+                                res.scrape_cache_status = "kb_semantic_hit"
+                                res.kb_meta = {
+                                    "age_s": age,
+                                    "content_hash": kb_entry["content_hash"],
+                                    "kb_score": kb_entry["score"],
+                                    "num_chunks": kb_entry["num_chunks"]
+                                }
+                                self._emit_event({
+                                    "type": "firecrawl_scrape_done",
+                                    "tc_id": tc.id, "url": res.url,
+                                    "status": f"kb_semantic_hit(score={kb_entry['score']:.2f})"
+                                })
+                                continue
+                            else:
+                                logger.info(
+                                    f"[Pipeline] [{tc.id}] KB SEMANTIC STALE {res.url} "
+                                    f"(age={age:.0f}s). Re-scraping."
+                                )
+                                res.scrape_cache_status = "stale"
+                                res.kb_meta = {"old_hash": kb_entry["content_hash"]}
+                        else:
+                            logger.info(f"[Pipeline] [{tc.id}] KB SEMANTIC MISS {res.url}. Will scrape.")
+                            res.scrape_cache_status = "miss"
+    
+                        scrape_tasks.append(asyncio.create_task(_scrape_and_process(res)))
+    
+                    if scrape_tasks:
+                        await asyncio.gather(*scrape_tasks)
+    
+                # Fire indexing immediately — runs in background while LLM calls proceed
+                indexing_task = None
+                if tc_new_entries:
+                    logger.info(f"[Pipeline] [{tc.id}] Launching background indexing for {len(tc_new_entries)} doc(s)...")
+                    indexing_task = asyncio.create_task(
+                        self.indexer.index_batch_deduped(tc_new_entries)
+                    )
+                for url, md, q in tc_stale_updates:
+                    task_update = asyncio.create_task(self.indexer.update_existing(url, md, "", q))
+                    self._background_tasks.add(task_update)
+                    task_update.add_done_callback(self._background_tasks.discard)
+    
+                search_results_dict[tc.id] = fc_results
+    
+                # Judge
+                logger.info(f"[Pipeline] [{tc.id}] JUDGE...")
+                eval_res = await self.judge.evaluate(tc, fc_results)
+                eval_results.append(eval_res)
+                
+                # Update live state immediately so frontend updates Test Cases tab
+                self.live_eval_results = [r for r in self.live_eval_results if r.test_case_id != eval_res.test_case_id] + [eval_res]
+                await self._save_live_run(self.current_run_id, self.live_test_cases, self.live_eval_results, self.live_tc_diagnoses)
                 self._emit_event({
-                    "type": "dimension_scored",
-                    "tc_id": tc.id,
-                    "dimension": de.dimension_name,
-                    "score": de.score,
-                    "level": de.assigned_level,
-                    "weight": de.weight
+                    "type": "state_update",
+                    "eval_results": [r.to_dict() for r in self.live_eval_results]
                 })
-
-            self._emit_event({
-                "type": "tc_complete",
-                "tc_id": tc.id,
-                "overall": eval_res.overall_score,
-                "passed": eval_res.passes(self.config.pass_threshold, getattr(self.config, 'dimension_floor', 0.40)),
-                "dimension_scores": [
-                    {"name": d.dimension_name, "score": d.score}
-                    for d in eval_res.dimension_evals
-                ]
-            })
-
-            self._emit_event({
-                "type": "judge_scored",
-                "tc_id": tc.id,
-                "overall": eval_res.overall_score,
-                "dimension_scores": [
-                    {
-                        "name": d.dimension_name,
-                        "weight": d.weight,
-                        "score": d.score,
-                        "level": d.assigned_level
-                    } for d in eval_res.dimension_evals
-                ],
-                "warnings": eval_res.warnings,
-                "has_report": False
-            })
-
-            if indexing_task is not None:
-                task_index = asyncio.create_task(self._finalize_indexing(indexing_task, tc.id))
-                self._background_tasks.append(task_index)
-            return None
+                logger.info(
+                    f"[Pipeline] [{tc.id}] Judge: overall={eval_res.overall_score:.3f} "
+                    f"cov={eval_res.coverage_score:.3f} rnk={eval_res.ranking_score:.3f} "
+                    f"dims={len(eval_res.dimension_evals)}"
+                )
+    
+                # Kick off live diagnostic analysis and reporting in the background
+                task = asyncio.create_task(self._post_judge_pipeline(tc, eval_res, fc_results, self.current_run_id))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+    
+                # Persist successfully processed test case to the test case history store
+                await self.history.append_async(tc)
+    
+                for de in eval_res.dimension_evals:
+                    self._emit_event({
+                        "type": "dimension_scored",
+                        "tc_id": tc.id,
+                        "dimension": de.dimension_name,
+                        "score": de.score,
+                        "level": de.assigned_level,
+                        "weight": de.weight
+                    })
+    
+                self._emit_event({
+                    "type": "tc_complete",
+                    "tc_id": tc.id,
+                    "overall": eval_res.overall_score,
+                    "passed": eval_res.passes(self.config.pass_threshold, getattr(self.config, 'dimension_floor', 0.40)),
+                    "dimension_scores": [
+                        {"name": d.dimension_name, "score": d.score}
+                        for d in eval_res.dimension_evals
+                    ],
+                    "duration_s": time.time() - tc_start_time
+                })
+    
+                self._emit_event({
+                    "type": "judge_scored",
+                    "tc_id": tc.id,
+                    "overall": eval_res.overall_score,
+                    "dimension_scores": [
+                        {
+                            "name": d.dimension_name,
+                            "weight": d.weight,
+                            "score": d.score,
+                            "level": d.assigned_level
+                        } for d in eval_res.dimension_evals
+                    ],
+                    "warnings": eval_res.warnings,
+                    "has_report": False
+                })
+    
+                if indexing_task is not None:
+                    task_index = asyncio.create_task(self._finalize_indexing(indexing_task, tc.id))
+                    self._background_tasks.add(task_index)
+                    task_index.add_done_callback(self._background_tasks.discard)
+                return None
+            
+            except Exception as e:
+                logger.error(f"[Pipeline] [{tc.id}] FATAL ERROR processing TC: {e}", exc_info=True)
+                
+                fail_res = EvalResult(
+                    test_case_id=tc.id,
+                    overall_score=0.0,
+                    dimension_evals=[],
+                    warnings=[f"Pipeline Execution Failed: {str(e)}"]
+                )
+                eval_results.append(fail_res)
+                
+                self._emit_event({
+                    "type": "tc_complete",
+                    "tc_id": tc.id,
+                    "overall": 0.0,
+                    "passed": False,
+                    "dimension_scores": [],
+                    "duration_s": time.time() - tc_start_time
+                })
+                self._emit_event({
+                    "type": "judge_scored",
+                    "tc_id": tc.id,
+                    "overall": 0.0,
+                    "dimension_scores": [],
+                    "warnings": [f"Pipeline Execution Failed: {str(e)}"],
+                    "has_report": False
+                })
+                return None
 
     async def _finalize_indexing(self, indexing_task, tc_id):
         try:
@@ -464,12 +509,10 @@ class Orchestrator:
         })
         
         try:
-            # Init resources concurrently
-            await asyncio.gather(
-                self.qdrant.init_collection(),
-                self.qdrant.init_query_cache_collection(),
-                self.embedder.warmup()
-            )
+            # Init resources sequentially to avoid Windows ProactorEventLoop concurrency bugs with SSL sockets
+            await self.qdrant.init_collection()
+            await self.qdrant.init_query_cache_collection()
+            await self.embedder.warmup()
             
             # Evict stale query cache entries
             await self.retriever.evict_stale_query_cache(
@@ -494,32 +537,46 @@ class Orchestrator:
             total_needed = self.config.num_test_cases
             semaphore = asyncio.Semaphore(1)
 
+            # Generate the first TC
+            logger.info(f"=== Session Progress — generating TC 1/{total_needed} ===")
+            self._emit_event({"type": "phase_start", "phase": "test_generation",
+                              "message": f"Generating TC 1/{total_needed}...",
+                              "current": 1, "total": total_needed, "pct": int((1/total_needed)*100)})
+            self._emit_event({"type": "phase_progress", "phase": "test_generation", "current": 1, "total": total_needed})
+
+            new_tcs = await self.generator.generate(1)
+            if not new_tcs:
+                logger.warning(f"[Orchestrator] Generator returned 0 TCs — stopping early.")
+                return ""
+            next_tc = new_tcs[0]
+
             for i in range(total_needed):
-                # --- Generate TC ---
-                logger.info(f"=== Session Progress — generating TC {i+1}/{total_needed} ===")
-                self._emit_event({"type": "phase_start", "phase": "test_generation",
-                                  "message": f"Generating TC {i+1}/{total_needed}...",
-                                  "current": i+1, "total": total_needed, "pct": int(((i+1)/total_needed)*100)})
-                self._emit_event({"type": "phase_progress", "phase": "test_generation", "current": i+1, "total": total_needed})
-
-                new_tcs = await self.generator.generate(1)
-                if not new_tcs:
-                    logger.warning(f"[Orchestrator] Generator returned 0 TCs — stopping early.")
-                    break
-                tc = new_tcs[0]
-
+                tc = next_tc
+                
                 all_test_cases.append(tc)
                 self.live_test_cases = all_test_cases
                 self._emit_event({"type": "test_case_created", "tc_id": tc.id, "query": tc.query})
                 
-                # --- Execute this TC ---
+                # --- Execute this TC and Generate next TC concurrently ---
                 self._emit_event({"type": "phase_start", "phase": "execution",
                                   "message": f"Executing TC {i+1}/{total_needed}...",
                                   "current": i+1, "total": total_needed})
                 self._emit_event({"type": "phase_progress", "phase": "execution", "current": i+1, "total": total_needed})
                 
-                result = await self._process_tc(tc, i, total_needed, i+1,
-                                     all_search_results, all_eval_results, semaphore)
+                async def generate_next():
+                    if i + 1 < total_needed:
+                        logger.info(f"=== Session Progress — generating TC {i+2}/{total_needed} ===")
+                        self._emit_event({"type": "phase_start", "phase": "test_generation",
+                                          "message": f"Generating TC {i+2}/{total_needed}...",
+                                          "current": i+2, "total": total_needed, "pct": int(((i+2)/total_needed)*100)})
+                        tcs = await self.generator.generate(1)
+                        return tcs[0] if tcs else None
+                    return None
+
+                process_task = asyncio.create_task(self._process_tc(tc, i, total_needed, i+1, all_search_results, all_eval_results, semaphore))
+                generate_task = asyncio.create_task(generate_next())
+                
+                result, next_tc = await asyncio.gather(process_task, generate_task)
                 
                 new_indexed = result.new_indexed if result else 0
                 deduped = result.deduped if result else 0
@@ -533,6 +590,10 @@ class Orchestrator:
                     "deduped_docs": deduped
                 })
                 logger.info(f"=== Session Progress — {len(all_eval_results)}/{total_needed} TCs complete ===")
+                
+                if next_tc is None and i + 1 < total_needed:
+                    logger.warning("[Orchestrator] Generator returned 0 TCs — stopping early.")
+                    break
 
             # Wait for all background diagnostics/reports to finish before proceeding to RL Signals
             if self._background_tasks:
@@ -738,6 +799,10 @@ class Orchestrator:
             self.store.write_run_metadata(run_id, error_meta)
             self._emit_event({"type": "run_error", "error": str(e)})
         finally:
+            if self._background_tasks:
+                logger.info(f"Waiting for {len(self._background_tasks)} background task(s) to complete...")
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                
             await self.or_pool.aclose()
             if 'file_handler' in locals():
                 logging.getLogger().removeHandler(file_handler)
